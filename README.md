@@ -1,0 +1,2233 @@
+# 多无人机通信—定位联合优化研究工程
+
+本项目用于研究纯 Python 三维多无人机环境中的协同定位、动态通信拓扑、GAT 图表示和 MAPPO 联合优化。所有实验数据均由项目内的 NumPy/PyTorch 仿真环境生成；`knowledge/` 中的论文只作为理论和模型设计参考，不作为训练、验证、测试或参数校准数据源。
+
+## 目录职责
+
+| 路径 | 职责 |
+| --- | --- |
+| `knowledge/` | 参考文献、文献笔记和理论资料 |
+| `src/` | 环境、传感器、信道、EKF、GAT、MAPPO 和实验代码 |
+| `data/` | Python 仿真数据、校准扫描和模型检查点 |
+| `plots/` | 实验图和诊断图 |
+| `logs/` | 与实验图对应的 CSV/JSONL 日志 |
+| `sections/` | 论文章节材料；`sections/2_system_model.md` 是唯一符号登记源 |
+| `tests/` | 环境、EKF、schema、配置入口和绘图测试 |
+| `main.py` | 轻量化入口，转发到 `src/cli.py` |
+
+## 当前状态
+
+### 实验产物清理（2026-09-09）
+
+已清理 2026-09-02 00:00 至 2026-09-07 12:00 期间生成的 `data/`、`logs/`、`plots/` 实验文件及对应 Python 缓存，共 235,186 个文件、约 54.11 GB。`src/`、`tests/`、`sections/`、入口文件、配置、知识库和答辩文档未删除。历史实验输出不再作为当前运行的隐式依赖；若版本化 manifest 不存在，实验模板使用显式的 3-UAV 默认配置构造，保证清理后代码仍可执行。
+
+随后按用户明确列出的目录名，又从 `data/`、`logs/`、`plots/` 中删除了 37 个版本化实验结果目录（包括 `mainline_core_framework_v5` 至 `v11` 的截图所列结果目录及 `advisor_report_seed42_v10`），共 684 个文件、约 143 MB。此次删除仅作用于这些实验结果目录及其内容；源代码、测试、论文章节、配置和目录骨架保留。README 中对应的历史说明仅作过程记录，已删除目录不再作为可复现实验产物。
+
+### 当前论文主线命名（2026-09-04）
+
+当前论文主方法统一写作 **Local-EKF-GAT-MAPPO (Proposed Method)**，其代码和结果目录中的兼容内部标识仍为 `baseline_mappo`。这里的
+`baseline` 只表示“未叠加历史 proxy/通信约束实验块的核心框架参照”，不是论文中的弱基线；核心方法本身包含本地 EKF、动态图 GAT 和 MAPPO。
+
+`communication_constrained_proxy_guided_mappo` 已从当前论文主线和新图表中停用，不再作为主方法、基线或新实验分支。它的历史源代码、checkpoint、日志和结果目录暂时保留并标记为 deprecated，仅用于追溯已经完成的历史实验；删除这些文件会破坏旧结果复现，因此不做物理删除。
+
+当前主线图表使用 `paper_scope.active_mainline_methods` 和 `Local-EKF-GAT-MAPPO (Proposed Method)` 显示标签；CSV、manifest 和 checkpoint 仍保留内部 ID，便于精确复现。
+
+当前主线的新实验协议为 `core-framework-v3`。它只训练和绘制 `Local-EKF-GAT-MAPPO (Proposed Method)`，并在 validation 后两张主图中与 `local_only_fixed`、`random_cooperative` 和 `budgeted_greedy_ig` 三个规则参照比较；不训练、不读取或展示 MLP。相较历史协议，v3 保留本地 EKF、GAT、通信、奖励和物理目标定义，采用逐候选动作头、四回合 rollout 稳定配置，并将 PPO 旧对数概率固定对应策略采样动作；安全投影后的执行动作单独记录。历史协议仍可用来复现实验档案，但不应作为论文主线入口。
+
+`core-framework-v3` 的 seed=42 Smoke 已完成，输出在 `mainline_core_framework_v3_seed42/smoke/reference/`，
+结构审计为 `audit_ok=true`，test 访问为 0，且只包含 Proposed 训练与三个规则 validation 结果。
+Smoke 中 Proposed 的 validation RMSE 为约 `0.4197 m`，低于 Local、Random 和 Greedy 的约
+`0.4382/0.4554/0.4401 m`；该结果仅用于接口和数值链路检查。`20/100/20/20` development
+已完成，结构审计为 `audit_ok=true`，但仍只是 seed=42 描述性结果：Proposed 的 validation
+RMSE/P95 为约 `0.41084/0.70071 m`；RMSE 低于 Local 和 Random（分别为
+`0.43604 m`、`0.41431 m`），P95 低于 Local 但略高于 Random（分别为
+`0.73382 m`、`0.69932 m`），而不如
+`budgeted_greedy_ig` 的 `0.40070/0.67771 m`。Proposed 实际测量负载约 `53.66 kB`、
+`J_com=0.07649`，高于三个规则参照的负载或通信目标，不能表述为全面优于基线。
+训练 approximate KL 最大约 `0.01318`、95% 分位约 `0.00967`，未再出现历史数量级尖峰；
+但训练报告回报仍受 15/100 个碰撞回合影响，固定监测场景最终 RMSE 低于初始值而平均报告
+奖励略下降。因此本轮仅确认 PPO 采样概率语义和数值链路改善，不继续自动运行 actor 学习率
+或反馈对齐变体，也不宣称训练曲线已收敛或跨 seed 稳定。
+
+v3 输出目录：
+
+```text
+data/synthetic/mainline_core_framework_v3_seed42/development/reference/
+logs/preliminary/mainline_core_framework_v3_seed42/development/reference/
+plots/preliminary/mainline_core_framework_v3_seed42/development/reference/
+```
+
+五张主图只保留 Proposed 的前三张训练图，后两张保留 Proposed、Local、Random、Greedy
+的 validation 对照；每张图均同时导出 PNG 和 PDF。全量测试为 `284 passed`，
+`main.py audit-symbols` 通过（285 个规范符号，无重复）。
+
+### `core-framework-v4` 训练反馈改善协议（seed=42 开发）
+
+v4 直接基于 v3 的 Local-EKF-GAT-MAPPO 代码，报告奖励、EKF、GAT、通信物理模型和动作空间
+保持不变，只新增训练期定位进度与实际测量负载反馈。三个反馈臂按 `loc-progress`、
+`actual-load`、`loc-progress-actual-load` 顺序检验；反馈目标只从 v3 baseline 的 `train`
+数据得到，validation 用于描述性比较，test 仅生成并封存。前三张图只显示 Proposed 训练曲线，
+后两张与 `local_only_fixed`、`random_cooperative`、`budgeted_greedy_ig` 比较。
+
+初次 v4 运行发现 `actual_measurement_cost_target` 曾按“每窗口总测量数”拟合，而环境的 `b_t`
+定义是“每 UAV 每窗口测量率”，导致 C/LC 的负载反馈恒为零。该量纲问题已修正，并以同一实现
+版本在独立目录 `mainline_core_framework_v4_corrected_seed42` 重跑 L/C/LC；旧目录保留为可追溯
+历史记录，不纳入本轮有效结论。修正后的三个 `2/5/5/5` Smoke 和三个 `20/100/20/20`
+development 均已完成，报告 `audit_ok=true`。修正目标为 `0.583141942028134`，来源为 v3
+baseline 的 100 个 train 回合（定义为每 UAV 每窗口测量率）。
+
+修正后的 seed=42 描述性 validation 结果显示，L/C/LC 三臂 Proposed 的 RMSE 分别约为
+`0.40820/0.40453/0.42293 m`，实际测量负载分别约为 `61.57/31.74/13.13 kB`；对应的
+Local/Random/Greedy 参照约为 `0.43604 m/0 bytes`、`0.41355 m/33.18 kB`、
+`0.39686 m/33.25 kB`（L、C 数值分别按各自 validation 运行记录）。因此 C 臂降低了负载并
+保持相对 Local/Random 的定位优势，但 LC 臂过度抑制测量，RMSE 反弹；不能把组合反馈称为
+同时优化成功，也不能由单个 seed 宣称稳定性。Smoke/development 结果只支持 seed=42 的
+机制诊断，最终论文结论仍需新 seed 的确认实验。
+
+修正后的 v4 输出根目录：
+
+```text
+data/synthetic/mainline_core_framework_v4_corrected_seed42/
+logs/preliminary/mainline_core_framework_v4_corrected_seed42/
+plots/preliminary/mainline_core_framework_v4_corrected_seed42/
+```
+
+### V4 P0--P3 有序曲线归因诊断（2026-09-06）
+
+新增只读入口 `run-ordered-v4-diagnostic`，只读取上述三个 development arm 的 train 和
+validation，不打开 test，不执行训练更新，也不修改 checkpoint。诊断结果写入：
+
+```text
+logs/preliminary/mainline_core_framework_v4_corrected_seed42/ordered_diagnostic_v2/
+plots/preliminary/mainline_core_framework_v4_corrected_seed42/ordered_diagnostic_v2/
+```
+
+P0 数据闭合通过：100 个 train episode、25 个 PPO update、每次 update 绑定 4 个 episode；
+报告/学习奖励闭合误差不超过 `1.1e-9`，测量事件闭合和 512-byte 负载闭合均为 0 个不匹配，
+test 访问次数为 0。P1 未发现 V4 的 PPO 数值发散（各 arm 最大 approximate KL 约
+`0.0120--0.0129`，低于目标 `0.05`），但非碰撞回报仍有明显方差，且总 loss 主要跟随
+critic loss。P2 确认定位进度差分错误地复用了绝对 logdet 的 warm-up scale（`u_scale≈0.0403`），
+组合反馈同时明显压低测量数量；P3 确认协同 UWB 能即时改善状态均值误差，但最终协方差被恢复，
+因此 `J_loc` 几乎不变，后续有效更新约 97% 为视觉里程计，beneficial 更新到 h5 的保持率约
+`0.41--0.45`。因此 P4 五种子确认实验暂缓，下一步先单独修正差分反馈尺度，再做 seed=42
+Smoke；若持久性仍不足，再单独检验执行可见的 VO 质量/协方差校准。
+
+### `core-framework-v6` 原始主方法训练稳定化开发结果（2026-09-06）
+
+v6 直接基于 `Local-EKF-GAT-MAPPO (Proposed Method)` 的核心框架，未加入历史
+proxy/quality teacher/通信约束分支，也未训练 MLP。此次只调整训练链路中已确认的三个量：
+不确定度使用 warm-up 的 Q05--Q95 归一化、碰撞惩罚配置从 10.0 调整为 2.0、梯度裁剪阈值从
+0.5 调整为 1.0；报告奖励与学习奖励均采用 `report_direct`，EKF、GAT、信道和动作空间保持不变。
+结果写入独立的 `mainline_reward_rebalanced_seed42` 目录，旧结果未覆盖。
+
+seed=42 的 `2/5/5/5` Smoke 和 `20/100/20/20` development 均完成，结构审计为
+`audit_ok=true`，共 25 次 PPO update，test 仅生成并封存。训练中 approximate KL 最大约
+`0.01154`、逐 update 的 95% 分位约 `0.01100`，未见历史数量级的 KL 发散；critic loss
+由前四分之一约 `2.34` 降至后四分之一约 `1.53`，但原始回报仍有明显随机波动，且 16/100
+个训练回合发生碰撞或提前终止。固定五个监测场景的平均 RMSE 从约 `0.3884 m` 变为
+`0.3902 m`，所以不能称为已收敛或已证明训练后定位变好。
+
+development validation 的 Proposed 结果为 RMSE/P95 `0.41473/0.70275 m`、实际负载
+`11.392 kB`、`J_com=0.02339`、有效更新约 `0.1718/window`；Local、Random、Greedy
+的 RMSE 分别约为 `0.43604/0.41538/0.39824 m`。因此 Proposed 明显优于 Local，
+与 Random 接近但略差于 Random，仍不如 Greedy；它的负载显著低于 Random/Greedy，但有效
+协同更新也更少。该结果支持“核心框架具备定位—通信权衡趋势”，不支持“单种子下全面最优”
+或“跨随机初始化稳定”。
+
+v6 输出目录：
+
+```text
+data/synthetic/mainline_reward_rebalanced_seed42/development/reference/
+logs/preliminary/mainline_reward_rebalanced_seed42/development/reference/
+plots/preliminary/mainline_reward_rebalanced_seed42/development/reference/
+```
+
+对应五张主图只保留 Proposed 的前三张训练图，后两张保留 Proposed、Local、Random、Greedy
+的 validation 对照；每张图均导出 PNG 和 PDF。下一步在不改变主方法定义的前提下，应优先解释
+“较少测量/更新”与“定位改善”的关系，再决定是否需要独立的多种子确认实验。
+
+### `core-framework-v7` 有限时域与训练方差稳定化开发结果（2026-09-06）
+
+在保留 `Local-EKF-GAT-MAPPO (Proposed Method)`、本地 EKF、GAT、MAPPO、信道和
+通信模型的前提下，v7 针对训练链路的七个已知干扰因素建立了独立开发协议：将 50 步任务
+作为有限时域目标，加入归一化剩余时间，关闭时间上限 bootstrap；使用 8 个完整 episode
+汇总后再执行 PPO 更新；actor 学习率减半；保留 Huber critic、value clipping、
+actor/critic 分组梯度裁剪和 sampled-action log-prob；报告奖励保持物理定义不变，PPO 学习
+通道仅对稀疏碰撞惩罚限幅。新增 `return_per_window` 仅用于消除回合长度对训练趋势图的
+混淆，不能替代报告奖励。
+
+结果写入独立目录，v6 及更早结果未覆盖：
+
+```text
+data/synthetic/mainline_core_framework_v7_seed42/development/reference/
+logs/preliminary/mainline_core_framework_v7_seed42/development/reference/
+plots/preliminary/mainline_core_framework_v7_seed42/development/reference/
+```
+
+v7 的 Smoke 和 development 均通过结构审计；全量测试为 `305 passed, 5 skipped`，
+`main.py audit-symbols` 通过。development 共 100 个训练 episode、13 次 PPO update，
+报告回报均值约 `-10.17`，前/后四分之一约为 `-10.61/-10.34`；平均窗口奖励约为
+`-0.222/-0.230`，所以原始奖励仍有场景和提前终止引起的波动，但没有出现数值发散。
+14/100 个回合提前终止，平均有效窗口约 46.39。Loss 从首个 update 的约 `0.97` 降至
+末个 update 的约 `0.20`，approximate KL 最大约 `0.010`，说明 PPO 更新链路稳定，不能
+再把主要问题归咎于灾难性 KL 发散。
+
+validation 的 Proposed 结果为 RMSE/P95 `0.40878/0.69379 m`，Local、Random、Greedy
+分别为 `0.43604/0.73382`、`0.41787/0.69637`、`0.40055/0.67992 m`。因此 v7 在该
+单种子开发场景下优于 Local 和 Random，但仍不如 Greedy，不能称为全面最优。Proposed 的
+实际测量负载约 `52.147 kB/回合`，高于 Random/Greedy 的约 `36.4 kB/回合`，且 harmful
+更新比例约 `0.356`；这说明稳定化改动降低了训练目标的数值风险，却使策略偏向更频繁测量，
+通信—定位闭环仍未达到受控状态。固定监测 RMSE 从约 `0.380` 降至 `0.354 m`，属于有利
+的开发信号，但不能抵消 validation 的通信非劣效要求。
+
+因此 v7 的正确结论是“训练链路稳定性得到改善、定位有改善趋势，但通信代价尚未受控，
+尚未证明主方法全面优于基线”。下一步应只处理测量预算/实际通信代价与测量动作之间的
+衔接，并继续保留 v7 的有限时域和 PPO 稳定设置；不得通过隐藏高负载或删除碰撞回合改善图形。
+
+```text
+C:\Users\lenovo\anaconda3\python.exe main.py run-mainline-baseline-comparison --protocol core-framework-v1 --stage smoke
+C:\Users\lenovo\anaconda3\python.exe main.py run-mainline-baseline-comparison --protocol core-framework-v1 --stage development
+```
+
+`core-framework-v2` 的 seed=42 入口为：
+
+```text
+C:\Users\lenovo\anaconda3\python.exe main.py run-mainline-baseline-comparison --protocol core-framework-v2 --stage smoke
+C:\Users\lenovo\anaconda3\python.exe main.py run-mainline-baseline-comparison --protocol core-framework-v2 --stage development
+```
+
+v2 仍是单个开发 seed 的实现与描述性比较；在 Smoke 和 development 完成前，不宣称跨随机初始化稳定，也不把训练专用 `R^{learn}_t` 当作最终性能指标。输出保存在 `mainline_core_framework_v2_seed42/<stage>/reference/`，旧 v1、历史实验和 checkpoint 保持不变。
+
+### `stabilized-v4` 持久信息收益—通信代价一致化版本（历史归档，2026-09-04）
+
+在不覆盖历史结果、不给基线人为降级的前提下，新增了版本化协议
+`stabilized-v4`。该版本仅对 `communication_constrained_proxy_guided_mappo` 接入三步
+持久信息收益代理，并令 teacher 与通信约束共用包含固定 512 bytes 测量负载的候选代价；
+teacher 使用 baseline-train 目标的相对代价。`baseline_mappo`、`mappo_mlp`、三个规则
+基线和旧协议的默认行为保持不变。代理拟合只读取 baseline train 的 1332 条候选行，
+validation/test 均未用于拟合；新的实验根目录为
+`mainline_baseline_comparison_v4_seed42`。该次运行保留用于追溯；由于当时规则贪心基线没有显式接收
+baseline-train 的代理模型，不能把其中的 `budgeted_greedy_ig` 结果作为有效强基线比较。
+
+seed=42、3 UAV 的 `2/5/5/5` Smoke 已完成，报告为 `audit_ok=true`，所有六种方法的
+`episode-v1.3` 数据、checkpoint 和五张紧凑诊断图均已生成；全量测试为 `277 passed`，
+`main.py audit-symbols` 通过。Smoke 只证明实现与数据链路正确，`cross_seed_stability`
+仍为 `not_evaluated`，不能据此宣称 MAPPO 已稳定优于基线。
+
+Smoke 报告：
+
+```text
+logs/preliminary/mainline_baseline_comparison_v4_seed42/smoke/reference/audit_report.json
+```
+
+Smoke 图表：
+
+```text
+plots/preliminary/mainline_baseline_comparison_v4_seed42/smoke/reference/
+```
+
+### `stabilized-v4-corrected` 有效强基线重跑（2026-09-04）
+
+为修复上述比较缺口，新增独立协议 `stabilized-v4-corrected`，不覆盖历史目录。
+`budgeted_greedy_ig` 在运行前接收同一份只由 `baseline_mappo/train` 拟合的执行期代理模型，
+无代理模型时接口现在直接失败，不再静默退化为全 `none` 动作。该模型的来源、行数以及
+validation/test 未参与拟合的标记会写入 `rule_measurement_proxy_model.json` 和
+`audit_report.json`；持久代理、目标率、场景、EKF、GAT、信道、队列、奖励和动作空间均保持
+原协议定义。
+
+完整 development 已完成于：
+
+```text
+data/synthetic/mainline_baseline_comparison_v4_corrected_seed42/development/reference/
+logs/preliminary/mainline_baseline_comparison_v4_corrected_seed42/development/reference/
+plots/preliminary/mainline_baseline_comparison_v4_corrected_seed42/development/reference/
+```
+
+六种方法均完成 `20/100/20/20`，结构审计为 `audit_ok=true`。validation 的单种子描述性结果为：
+通信约束主方法 RMSE `0.40050 m`、实际负载 `43008 bytes`；GAT-MAPPO 基线为 `0.40797 m`、
+`64640 bytes`；预算贪心基线为 `0.40015 m`、`36224 bytes`。因此主方法相对 GAT 基线呈现
+约 `0.00747 m` 的 RMSE 改善和约 `33.5%` 的负载下降，但与贪心基线的 RMSE 几乎持平且略高，
+不能宣称全面优于所有基线，也不能把单个 seed 当作稳定性证据。
+本次代码验收为 `278 passed`，`main.py audit-symbols` 通过；这些结构验收不等同于算法
+性能显著性检验。
+
+### seed=42 训练趋势冻结诊断 v2（2026-09-04）
+
+已完成 `python main.py run-training-trend-diagnostic --audit-version v2 --stage frozen-audit --seed 42`。该版本只读重放 corrected-v2/rollout4 的 GAT-MAPPO 基线和通信约束主方法，在五个固定开发监测场景上比较初始/最终 checkpoint，并对主方法执行 80 个冻结 autograd 梯度探针；不调用 `trainer.update()`、`optimizer.step()` 或 dual 更新，不读取 test，不修改源数据和 checkpoint。
+
+最终审计报告位于 `logs/preliminary/training_trend_diagnostic_seed42/frozen-audit-v2/audit_report.json`，结果为 `audit_ok=true`：20 个端点全部与历史监测值匹配，556 个协同更新事件、2661 条动作/通信证据和 80 个梯度探针已生成；参数更新、优化器步数和乘子更新均为 0，test 访问为 0，checkpoint 哈希前后一致。五张诊断图位于 `plots/preliminary/training_trend_diagnostic_seed42/frozen-audit-v2/`，包括奖励—回合长度归因、冻结端点对比、更新质量、期望/实际通信代价和梯度路径。
+
+审计确认训练奖励低谷与回合长度/碰撞混合、定位奖励反馈弱以及期望通信代价与实际选中代价存在口径差异；固定监测端点没有显示持续改善。critic 梯度主导和 PPO—教师方向仅作为进一步检验或非因果诊断，不能据此宣称算法收敛或跨随机初始化稳定。全量测试 `273 passed`，`main.py audit-symbols` 通过。
+
+### seed=42 训练趋势冻结诊断（2026-09-04）
+
+新增 `python main.py run-training-trend-diagnostic --seed 42 --stage frozen-audit`，只读 corrected-v2 的 R/P/T 训练汇总及 T 组冻结参数。重建初始策略并核对模块哈希，在原五个开发监测场景重放 GAT 基线与主方法的初始/最终策略；另在前四个 train 场景收集初始/最终策略梯度探针，不执行优化器更新、不读取 test。
+
+诊断结果保存到 `logs/preliminary/training_trend_diagnostic_seed42/frozen-audit/`，诊断图在对应 `plots/` 目录。新目录非空即停止，保留旧实验和旧五张主图。探针记录加权损失梯度、测量头 PPO/教师方向余弦、联合及假设分组裁剪保留量；这些不是历史训练梯度，也不是 Adam 参数更新。
+
+筛选门槛固定为至少 20 个有效 actor 非零 minibatch，至少一半同时满足 critic 平方范数占比不低于 80%、分组裁剪保留 actor 范数至少为联合裁剪两倍。未通过时 `--stage smoke` 只报告 `not_run_gate_failed`，不启动训练、不新增裁剪算法。本轮不授权 100 回合对照或多种子实验，不以图形平滑程度判定收敛。
+
+本次 v1 结果已由上方 v2 复核；旧目录和旧报告保留用于追溯，不与 v2 输出混用。
+
+### 五种子主线绘图 mainline-v2（2026-09-03）
+
+`run-final-mainline-audit --figure-profile mainline-v2` 新增只读绘图模式，默认旧模式仍保留。使用最新 VO 校准组的 3 UAV、五训练种子、三个分支；训练图只读 train，性能图只读 validation。独立 split 日志优先于混合日志；v2 文件访问保护会拒绝 test、混合诊断日志读取及源文件写入。
+
+```text
+C:\Users\lenovo\anaconda3\python.exe main.py run-final-mainline-audit --reference data/synthetic/communication_constrained_proxy_mappo_vo_calibrated_seedset_27281_31327 --output logs/preliminary/communication_constrained_proxy_mappo_vo_calibrated_seedset_27281_31327/mainline_figures_v2 --plots-output plots/preliminary/communication_constrained_proxy_mappo_vo_calibrated_seedset_27281_31327/mainline_figures_v2 --figure-profile mainline-v2 --seeds 27281 28290 29309 30318 31327 --expected-episodes 20 --expected-training-updates 100 --bootstrap-samples 10000 --bootstrap-seed 2026
+```
+
+生成八张 300 dpi PNG 与矢量 PDF：训练奖励/总损失、损失分量、四项奖励分解、定位性能、通信代价、EKF 更新质量、通信—定位配对权衡、逐 seed 配对差异。奖励总图在左侧，定位/通信/碰撞/能耗四项贡献在右侧；碰撞和能耗插图采用全部分支及其区间的共同中央范围并保留零线，主图保留完整尖峰。四项从冻结 reward_config 与归一化日志还原，按 episode_id 绑定 Update，闭合容差为 1e-6。
+
+训练置信带重采样完整 seed 曲线，并对分支复用同一索引；它是逐点区间，不是同时置信带。validation 先 episode 后 seed 等权汇总；更新质量比例的缺失值记 NA，每窗口更新数在无更新时记零。收益保持率属于真实轨迹上的描述性误差诊断，不是无更新反事实。通信贡献可为正，保留原符号；实际代理代价不等于字节数或 J_com。
+
+对应 CSV、中文图注、源文件/检查点 SHA-256 与 audit_report.json 写入日志目录；旧风格复用审计图放在新图目录的 diagnostics_legacy 子目录。v2 即使指定 --force 也拒绝覆盖非空目录，重复生成应选择新的输出后缀。既有算法判定保留，不能通过绘图更新有效性结论。安全场景与无人机规模不在本次绘图范围内。
+
+### seed=42、3 架 UAV 弱强基线比较（2026-09-03）
+
+已完成 `run-mainline-baseline-comparison` 的 Smoke 和 development 流程。该实验固定 3 架 UAV、Moderate、GNSS denied、50 步，使用 seed=42；Smoke 为 `2/5/5/5`，development 为 `20/100/20/20`。A 组完整系统比较包含 `local_only_fixed`、`random_cooperative`、`budgeted_greedy_ig`、`mappo_mlp`、`baseline_mappo` 和 `communication_constrained_proxy_guided_mappo` 六种方法；B 组是冻结 checkpoint 后统一固定飞行/带宽的测量选择诊断，另保留 `proxy_guided_adaptive_budgeted_quality_aware_mappo` 作为机制消融。
+
+规则方法不调用 `trainer.update()`；`local_only_fixed` 保留背景通信，不能解释为零通信。贪心基线使用 baseline-train 的硬预算和执行期可见信息，已修正为只记录当前时间步新增的协同更新事件。B 组现在保存 `validation_cooperative_updates.jsonl`，因此 accepted、beneficial 和 harmful 更新指标不再以缺失日志替代为零。
+
+结果和图表位于：
+
+```text
+data/synthetic/mainline_baseline_comparison_dev_seed42
+logs/preliminary/mainline_baseline_comparison_dev_seed42
+plots/preliminary/mainline_baseline_comparison_dev_seed42/A
+plots/preliminary/mainline_baseline_comparison_dev_seed42/B
+```
+
+结构审计 `audit_ok=true`，20 个 validation episode 在 A 组六种方法和 B 组四个冻结学习策略中均完整，奖励分解闭合最大误差约 `1.3e-9`，test 未用于拟合、选择或绘图。A 组的单种子描述性结果中，通信约束方法的向量范数 RMSE 约为 `0.3987 m`、GAT-MAPPO baseline 约为 `0.4081 m`，但两者不能据此形成跨随机初始化稳定性或普遍优越性结论；训练曲线、validation 图和 B 组诊断图必须结合 `figure_index.md` 及 CSV 一起解释。
+
+本轮仅新增比较接口、`mlp_flat` 架构对照、规则基线重放和绘图审计；未修改 EKF、奖励、GAT 算法、信道、物理模型或旧实验目录。完整测试和 `main.py audit-symbols` 均通过。
+
+本次 VO 校准组已完成八张主图及 PDF 导出：1500 个训练 Update、71966 个训练窗口和 300 个 validation 回合。奖励闭合最大误差约 1.25e-9；5177 个源文件（含 15 个检查点）哈希未变，test 访问次数为 0。最终全测试集 247 项通过，符号审计通过。绘图结构审计 `audit_ok=true`；原有算法判定仍为 `decision_supported=false`。日志目录中的 `figure_index.md` 可浏览八张图，`verification_report.json` 记录测试和图像检查。
+
+代码联通性已完成：环境、EKF、GAT、MAPPO、episode-v1.3 日志、schema 验证和主图生成链路均可运行。当前已经完成 EKF 相对 VO 的时间一致性修正、UWB EKF 更新周期、配置文件统一入口和 3 架无人机小规模验证。
+
+当前唯一作为后续检查起点的结果是：
+
+```text
+data/synthetic/python_sim_calibrated_v4_small
+```
+
+它是 3 架无人机、20/10/10 回合、每回合 50 步、单随机种子的 preliminary 结果，schema 为 `episode-v1.3`，验证和主图均已通过。它只能证明当前工程链路能够运行，不能直接作为论文最终结论。
+
+### 通信—协同定位稳定化第一阶段（2026-09-01）
+
+已完成代码层面的公平性与评价口径修正：开启新实验时，GAT、actor body、带宽头、速度头、对数标准差头和 centralized critic 使用固定的模块级随机流；每个 `scale_3/diagnostics/initial_parameter_hashes.json` 和 checkpoint 保存初始参数哈希。质量测量头仍可独立初始化，旧实验默认保持原有行为。
+
+新增的主要诊断字段包括 `position_rmse_norm_m`、`position_p95_norm_m`、`update_coverage_any`、`accepted_update_rate`、`beneficial_per_window`、`harmful_per_window`、`no_update_episode_count` 和 `j_loc_saturation_fraction`。通信代价同时报告期望代理代价、实际选中测量代价、512 字节负载和队列相关指标，避免用代理代价替代真实开销。
+
+seed=2026 的三分支 Smoke 已完成并通过结构审计和 `episode-v1.3`；共享模块初始哈希一致，旧结果目录未覆盖。Smoke 的 `decision_supported=false` 仅表示单种子不能形成算法有效性结论。新的五随机种子正式实验仍需使用独立目录运行完成后再判断 RMSE、更新质量和实际通信代价是否稳定改善。
+
+当前实际使用的候选 EKF 配置为：
+
+```text
+data/synthetic/python_sim_calibration_seed2026_v4/selected_ekf_config.json
+```
+
+该配置来自纯 Python 训练场景扫描，不是公开数据集或真实传感器校准。扫描选中参数为 `VO=0.05 m`、过程位置标准差 `0.08 m`、过程速度标准差 `0.25 m/s`、NLOS 协方差倍率 `1.0`。但选中候选的 NEES 95% 覆盖率约为 `0.0093`，没有达到预设目标，因此只能称为 preliminary 候选，不能称为最终校准参数。当前结果表现为协方差偏保守，而不是先前的过度自信。
+
+另外，UWB 测量仍按决策窗口记录，但本地 EKF 的成对 UWB 更新按 `sensor_config.uwb_update_period_s = 0.8 s` 执行。这一规则已写入 scale 的 `manifest.json`，用于避免同一时刻重复使用相同协同测距信息。
+
+### 协同 UWB 后续视觉交互的最小修正（2026-09-01）
+
+新增了只读入口 `run-ekf-sensor-interaction-audit`，用于在当前通信约束正式实验的 validation 数据上追踪协同 UWB 更新之后的视觉里程计、预测和后续滤波变化。该审计确认后续窗口主要由视觉里程计更新构成，协同 UWB 的短期误差收益随窗口延长而衰减；这说明当前首要问题是 VO 观测与协同 UWB 的后续交互，不是“通信动作完全不起作用”。审计不读取 test、不训练、不修改原始 episode 或 checkpoint。
+
+按照单一主因原则，代码增加了默认关闭的 `visual_odometry_quality_calibration_enabled`。启用时，仅使用本次运行的 train warm-up 中的 tracking quality 和执行期 VO 创新统计拟合一个固定的、质量单调的 VO 协方差映射，之后原样复用于 train、validation 和 test。低质量或缺失质量不会被当作高质量观测；历史实验默认仍使用固定 VO 协方差，因此旧结果不受影响。该机制只改变 VO 更新的观测协方差，不改奖励、协同 UWB、通信队列、GAT 或 MAPPO 动作。
+
+首轮验证应使用新的独立输出目录运行 3 架无人机、seed=2026 的 `2/5/5/5` Smoke，并检查 `calibration/visual_odometry_quality_model.json`、`integration_summary.json` 和每个 episode 的 `visual_odometry.csv`/`ekf_diagnostics.csv`。Smoke 通过后再在预注册的新 seeds 上做正式验证；在此之前不能把 VO 校准描述为 MAPPO 已经解决通信—协同定位问题。
+
+以下目录均为历史或旧实验结果，保留用于追溯，不作为当前有效结果：
+
+```text
+python_sim_preliminary
+python_sim_preliminary_100
+python_sim_preliminary_fixed
+python_sim_preliminary_fixed_v2
+python_sim_preliminary_fixed_v3
+python_sim_calibrated_v2_small
+python_sim_calibrated_v3_small
+```
+
+### 近期代理教师—有效 EKF 更新质量审计（2026-08-30）
+
+已对 `proxy_guided_adaptive_quality_mappo` 的 5 个训练随机种子、3 个分支和 validation 数据完成只读归因审计。审计报告位于：
+
+```text
+logs/preliminary/proxy_guided_adaptive_quality_mappo_seedset_7071_11127/proxy_update_quality_audit/audit_report.json
+```
+
+结构验收已通过：动作和队列开销重放一致，教师分布可复算，代理尺度来自 train，质量模型来自 warm-up，未读取 test，未调用训练更新，checkpoint 哈希未改变。代理效用与线性协方差收益总体一致（4/5 个 seed 对齐），但代理分支平均测量次数和通信代价更高，主要判定为 `communication_cost_dominant`；该审计不是算法有效性证明，`decision_supported=false`。后续应优先设计预注册的通信预算/代价约束实验，不同时修改 EKF、奖励或 GAT。
+
+### 有效协同 EKF 更新持续性审计（2026-08-31）
+
+为解释通信约束 MAPPO 中单次协同更新的收益是否能够保持，新增只读入口 `run-ekf-update-persistence-audit`。审计读取 `communication_constrained_proxy_mappo_seedset_12136_16172` 的 5 个训练 seed、3 个分支和 validation 数据，使用更新后的第 1、2、3、5 个决策窗口追踪同一目标 UAV 的误差、协方差和 `J_loc`；不重放环境、不训练、不读取 test，事件只作机制诊断，Bootstrap 先按 episode 汇总再按 seed 推断。
+
+输出位于：
+
+```text
+logs/preliminary/communication_constrained_proxy_mappo_seedset_12136_16172/ekf_update_persistence_audit/
+plots/preliminary/communication_constrained_proxy_mappo_seedset_12136_16172/ekf_update_persistence_audit/
+```
+
+结构验收通过：300 个 validation episode 完整，更新误差变化与线性协方差减少量公式闭合，审计未调用训练更新且未读取 test。主分支的 seed-level 诊断初步判定为 `benefit_not_persistent`：线性协方差每次均有下降，但立即有益的误差改善在后续窗口中仅约 42% 保持；单次更新的 `J_loc` 变化为 0，说明当前保守协方差恢复使 `J_loc` 对定位均值改善不敏感。该结果不是算法有效性证明；下一步应先审查 EKF 更新后的误差传播/持续性与协方差恢复机制，不应直接调奖励或宣称 MAPPO 已解决通信—协同定位问题。
+
+## 当前唯一执行顺序
+
+以下命令在 PyCharm 的“运行/调试配置 → 脚本参数”中填写，工作目录设为 `D:\research project`，解释器使用 `C:\Users\lenovo\anaconda3\python.exe`。
+
+### 1. 已完成的 EKF 扫描
+
+```text
+calibrate-ekf --output "D:\research project\data\synthetic\python_sim_calibration_seed2026_v4" --seed 2026 --uav-count 3 --episodes 10 --steps 50 --force
+```
+
+校准结果包括 `ekf_parameter_scan.csv` 和 `selected_ekf_config.json`。参数选择只使用训练场景的 NEES/NIS 和定位误差诊断，不使用 validation/test。由于 NEES 覆盖率目标未满足，不能据此直接进入论文级实验；应先明确初始估计误差/先验协方差的定义，再决定下一轮校准规则。
+
+### 2. 已完成的 3 架无人机小规模验证
+
+```text
+run-preliminary --output "D:\research project\data\synthetic\python_sim_calibrated_v4_small" --uav-counts 3 --seed 2026 --steps 50 --warmup-episodes 20 --train-episodes 20 --validation-episodes 10 --test-episodes 10 --ekf-config "D:\research project\data\synthetic\python_sim_calibration_seed2026_v4\selected_ekf_config.json" --device cpu --force
+```
+
+使用 `--ekf-config` 后，实际参数、配置文件路径和完整命令会写入每个 scale 的 `manifest.json`。如果同时显式传入冲突的四个 EKF 参数，程序会直接报错，避免配置混用。
+
+### 3. 验证和绘图
+
+```text
+validate-preliminary "D:\research project\data\synthetic\python_sim_calibrated_v4_small"
+```
+
+```text
+plot-main "D:\research project\data\synthetic\python_sim_calibrated_v4_small"
+```
+
+数据、图和日志分别位于：
+
+```text
+D:\research project\data\synthetic\python_sim_calibrated_v4_small
+D:\research project\plots\preliminary\python_sim_calibrated_v4_small
+D:\research project\logs\preliminary\python_sim_calibrated_v4_small
+```
+
+小规模验证只回答三个问题：EKF 是否一致、MAPPO 是否数值稳定、训练—验证—测试—日志—绘图链路是否闭合；不用于论文最终性能结论。
+
+### 4. 当前暂缓：中等规模实验
+
+小规模工程链路已经通过，但由于当前 EKF 扫描没有达到 NEES 覆盖率目标，中等规模实验暂不作为论文结果运行。解决初始估计先验和 NEES 评价口径后，才运行 3、5、7 架无人机：
+
+```text
+run-preliminary --output "D:\research project\data\synthetic\python_sim_medium_seed2026" --uav-counts 3 5 7 --seed 2026 --steps 100 --warmup-episodes 20 --train-episodes 100 --validation-episodes 20 --test-episodes 20 --ekf-config "D:\research project\data\synthetic\python_sim_calibration_seed2026_v4\selected_ekf_config.json" --device cpu --force
+```
+
+确认三种规模均通过 schema、loss/梯度/熵有限、动作不过度饱和、碰撞终止记录正确、validation/test 场景确实不同，并且 NEES 评价口径已经固定后，才进入论文级实验。
+
+### 5. 论文级实验
+
+论文级配置为 300/60/60 回合、每回合 300 步、3/5/7 架无人机，并至少使用多个随机种子，例如 `2026`、`3035` 和 `4044`。最终报告 validation 和 test 的均值、标准差或置信区间，同时报告核心目标、定位 RMSE、NEES/NIS、丢包率、时延、AoI、最大连通分量比例、碰撞率、安全距离、能耗代理和三维轨迹。
+
+## 结果解释边界
+
+- `J_t = J_loc,t + J_com,t` 是通信—定位核心目标；碰撞和能耗只进入强化学习团队奖励惩罚，不并入核心目标。
+- GNSS 当前为 `denied`；图中不得伪造局部 GNSS 失效区间。
+- NIS 必须区分 accepted 和 rejected；NEES 只在 episode 写出阶段使用真值计算，不进入 actor 或 critic。
+- 零碰撞不能单独证明策略学会避碰，因为环境安全投影会阻止危险动作；还必须报告最小安全距离、安全投影次数和动作饱和率。
+- 论文结论只适用于当前纯 Python 仿真环境，不能表述为已经完成真实飞行验证。
+
+## 代码检查
+
+在项目根目录运行：
+
+```text
+C:\Users\lenovo\anaconda3\python.exe -m pytest -q
+C:\Users\lenovo\anaconda3\python.exe main.py audit-symbols
+```
+
+旧结果不删除、不覆盖；每次修正使用新的输出目录，并在 README、manifest 和日志中记录实验状态。
+
+## 3 架无人机配对基线与动作—KPI 链路审计
+
+为落实“先证明问题存在，再判断完整方法解决了什么”的实验顺序，当前已在冻结的 Moderate 场景上完成 20 组同随机种子、同场景配对测试：
+
+```text
+MAPPO：
+data/synthetic/python_sim_moderate_seed2026_formal/scale_3
+
+独立固定最弱基线：
+data/synthetic/python_sim_independent_baseline_moderate_seed2026_formal/scale_3
+```
+
+独立固定基线不使用 GAT、MAPPO、中心状态、邻居状态或协同 UWB 更新。现有配对结果已经证明该环境会自然暴露连通性下降、碰撞、安全间距减小和能耗增加等问题；但尚未证明 MAPPO 能显著降低核心目标 (J_t)。因此当前不调整奖励权重，先执行窗口对齐的链路审计：
+
+```text
+audit-causal-chain --reference "D:\research project\data\synthetic\python_sim_moderate_seed2026_formal\scale_3" --baseline "D:\research project\data\synthetic\python_sim_independent_baseline_moderate_seed2026_formal\scale_3" --split test --bootstrap-samples 10000 --bootstrap-seed 2026
+```
+
+该命令按动作实际生效窗口对齐 `actions.csv`、`links.csv` 和 `rewards.csv`，并检查：
+
+```text
+动作 → 通信/定位 KPI → J_loc/J_com → J → 团队奖励
+```
+
+输出位于：
+
+```text
+logs/preliminary/python_sim_moderate_seed2026_formal/causal_audit/
+plots/preliminary/python_sim_moderate_seed2026_formal/causal_audit/
+```
+
+统计不把同一 episode 的时间步当作独立重复。`action_kpi_relation_summary.csv` 中的窗口内相关只用于定位链路弱点，不能解释为动作的因果效应；若要确认因果效应，下一阶段必须在冻结场景上预先登记并执行受控动作扰动实验。test 结果只用于审计和最终报告，不用于反向调节权重。
+
+### Validation 配对复核（2026-08-16）
+
+为避免根据 test 结果修改目标函数，已使用同一冻结 Moderate 场景另外生成 20 组 validation 配对 episode：
+
+```text
+MAPPO：
+data/synthetic/python_sim_moderate_seed2026_formal/scale_3/validation/
+
+独立固定最弱基线：
+data/synthetic/python_sim_independent_baseline_moderate_validation_seed2026/scale_3/validation/
+```
+
+对应审计输出为：
+
+```text
+logs/preliminary/python_sim_moderate_seed2026_formal/causal_audit_validation/
+plots/preliminary/python_sim_moderate_seed2026_formal/causal_audit_validation/
+```
+
+验证集复核确认了与 test 审计相同的结构性现象：独立固定基线的原始时延、AoI 尾部和失连程度更严重，MAPPO 的连通性和能耗明显更好；但当前采用训练集 95% 分位数缩放并裁剪到 `[0,1]` 的平均型通信代价，会压平少量灾难性窗口的严重程度，使基线在 `J_com` 和核心目标 `J` 上反而更低。目标恒等式和奖励恒等式的最大数值误差均约为 `1e-9`，因此这不是日志公式实现错误，而是当前目标对尾部风险不敏感。下一阶段如需修改目标聚合，只能使用 train/validation 预先比较平均代价、失连事件和尾部风险项；test 继续封存用于最终报告。
+
+## 独立固定策略配对基线
+
+为先确认当前场景是否真实暴露通信—定位联合优化问题，项目新增 `run-baseline`。该入口不会训练或调用 GAT/MAPPO，而是在现有 3 架无人机 MAPPO 测试场景上运行独立固定策略：每架无人机只使用本机 EKF 估计和目标，关闭协同 UWB 更新，并对潜在出边平均分配带宽。
+
+当前参考结果保持不变：
+
+```text
+data/synthetic/python_sim_current_seed2026/scale_3
+```
+
+在 PyCharm“脚本参数”中运行：
+
+```text
+run-baseline --reference "D:\research project\data\synthetic\python_sim_current_seed2026\scale_3" --output "D:\research project\data\synthetic\python_sim_independent_baseline_seed2026" --controller independent-fixed
+```
+
+`run-baseline` 支持 `--split validation` 或 `--split test`。目标函数、归一化方式和超参数只能根据 train/validation 确定；test 基线只在方案冻结后用于最终独立评价。
+
+如需重新生成该基线目录，才添加 `--force`。输出包括：
+
+```text
+data/synthetic/python_sim_independent_baseline_seed2026/scale_3/test/
+data/synthetic/python_sim_independent_baseline_seed2026/scale_3/diagnostics/paired_metrics.csv
+data/synthetic/python_sim_independent_baseline_seed2026/scale_3/diagnostics/paired_summary.csv
+data/synthetic/python_sim_independent_baseline_seed2026/scale_3/diagnostics/baseline_comparison.png
+```
+
+## 通信—定位环境筛选
+
+当前三无人机基线比较显示网络连通性长期饱和。为避免根据 MAPPO 是否获胜反向调整环境，项目新增独立的 `screen-scenarios` 阶段。该入口不训练、不加载也不评价 GAT/MAPPO，只使用本机估计驱动的固定目标跟踪、潜在出边等比例带宽和首个有效 UWB 邻居选择，扫描以下四个 Python 仿真参数：
+
+```text
+最大通信距离             25--65 m
+总带宽                   20 kHz--2 MHz（对数扫描）
+NLOS 附加损耗            16--40 dB
+每决策窗口消息到达量      1--30 packet
+```
+
+筛选场景还会增加一个位于两架无人机连线中部、沿垂直方向移动的三维遮挡体，使链路通过真实几何相交产生 NLOS→LOS 转换。程序不会按时间直接篡改丢包率；所有丢包、速率、队列和 AoI 仍由统一信道模型计算。
+
+设计采用带种子的随机化拉丁超立方。每个参数点用独立场景种子重复，episode 是独立重复单位，时间步不是独立样本。场景只有同时通过预先登记的连通性、候选边转化率、丢包、消息到达、EKF 邻居更新、碰撞和有限性门槛，才允许被标记为后续训练候选。若没有点通过全部门槛，`selected_profiles/*.json` 会明确写入 `allowed_for_training=false`，不得强行选择“最接近”的点。
+
+PyCharm 中新建一个 Python 运行配置，脚本仍为 `D:\research project\main.py`，工作目录为 `D:\research project`，脚本参数填写：
+
+```text
+screen-scenarios --output data/synthetic/scenario_screening_seed2026 --seed 2026 --design-points 36 --episodes-per-point 10 --steps 50 --ekf-config "D:\research project\data\synthetic\python_sim_calibration_seed2026_v4\selected_ekf_config.json"
+```
+
+首次确认接口时可运行较小的 smoke 配置：
+
+```text
+screen-scenarios --output data/synthetic/scenario_screening_smoke --seed 2026 --design-points 4 --episodes-per-point 2 --steps 10
+```
+
+正式筛选结果默认分开保存：
+
+```text
+data/synthetic/scenario_screening_seed2026/
+├── manifest.json
+└── selected_profiles/
+    ├── easy.json
+    ├── moderate.json
+    └── hard.json
+
+logs/screening/scenario_screening_seed2026/
+├── design_matrix.csv
+├── run_schedule.csv
+├── episode_metrics.csv
+├── step_metrics.csv
+├── parameter_summary.csv
+└── eligibility_report.csv
+
+plots/screening/scenario_screening_seed2026/
+├── saturation_diagnostics.png
+├── communication_coupling.png
+└── feasible_region.png
+```
+
+场景筛选结果只证明环境是否暴露联合优化问题，不证明 MAPPO 有效。只有冻结 `moderate.json` 后，才能重新训练三无人机 MAPPO，并在相同场景与种子上进行配对基线比较。
+
+统计以 episode 为独立重复单位，并按相同场景和随机种子进行配对；同一 episode 内的时间步不作为独立样本。该结果只用于判断当前场景是否存在值得优化的问题，不直接作为最终论文性能结论。
+
+当前已将冻结的 Moderate profile 接入正式训练入口。该入口会同时复用筛选阶段的通信参数和移动三维 LOS 遮挡几何；不提供 profile 时，`run-preliminary` 仍使用原有默认环境。第一次闭环只运行 3 架无人机的短实验：
+
+```text
+run-preliminary --output data/synthetic/python_sim_moderate_seed2026 --uav-counts 3 --seed 2026 --steps 50 --warmup-episodes 5 --train-episodes 10 --validation-episodes 2 --test-episodes 2 --scenario-profile data/synthetic/scenario_screening_seed2026/selected_profiles/moderate.json --ekf-config "D:\research project\data\synthetic\python_sim_calibration_seed2026_v4\selected_ekf_config.json" --device cpu --force
+```
+
+该输出标记为 `moderate_profile_closed_loop_pilot`，只用于确认筛选配置、环境、EKF、GAT、MAPPO 和日志已经闭环联通，不用于最终论文结论。完成该闭环后，才进入相同测试种子的独立固定策略基线配对比较。
+
+## 带宽动作受控扰动（2026-08-24）
+
+项目新增 `run-bandwidth-intervention`，用于只验证下面这一条机制链：
+
+```text
+带宽动作 → 信道/队列/数据包状态 → 丢包、时延、AoI、连通性 → J_com
+```
+
+该入口不重新训练 MAPPO，不修改奖励权重、目标公式、定位模型或碰撞场景，也禁止使用 test 数据。它读取冻结的 3 架无人机 Moderate validation 集，将每个 episode 按相同场景、seed、速度动作和测量选择重放三次：原 MAPPO 带宽、潜在出边均分带宽、原带宽比例置换。episode 是独立统计单位，窗口数据只用于机制诊断。
+
+PyCharm 中脚本仍选择 `D:\research project\main.py`，脚本参数填写：
+
+```text
+run-bandwidth-intervention --reference data/synthetic/python_sim_moderate_seed2026_formal/scale_3 --output data/synthetic/python_sim_bandwidth_intervention_moderate_validation_seed2026 --split validation --bootstrap-samples 10000 --bootstrap-seed 2026
+```
+
+如需替换同名输出，再添加 `--force`。本次完成的正式诊断输出为：
+
+```text
+data/synthetic/python_sim_bandwidth_intervention_moderate_validation_seed2026/
+logs/preliminary/python_sim_moderate_seed2026_formal/bandwidth_intervention/
+plots/preliminary/python_sim_moderate_seed2026_formal/bandwidth_intervention/
+```
+
+20 个 validation episode 的配对审计结果为：
+
+- 原 MAPPO 重放与参考 validation 的轨迹、链路 KPI 和目标值完全复现；
+- 三种处理的真实轨迹、障碍物、速度动作、测量动作、接收功率和 RSSI 扰动完全一致；
+- 98.7% 的全局决策窗口产生了有效带宽扰动，高于预设 20% 门槛；
+- 带宽改变后速率、丢包尾部、时延尾部和 AoI 尾部发生可检测变化，`J_com` 也随之响应；
+- 原 MAPPO 的平均 `J_com` 为 0.09079，均分为 0.09137，置换为 0.09217。原策略相对两种简单分配的配对差异 95% Bootstrap 区间均低于零，但绝对效应较小；
+- 原策略降低了丢包和 AoI，但时延 p95 略高，连通性在三种处理中没有变化。因此不能把本结果解释为所有通信 KPI 均优，也不能据此形成最终算法性能结论。
+
+当前决策门结论是：带宽动作确实进入了信道、队列和通信目标，代码链路不存在“动作完全不起作用”的问题；下一阶段可单独验证通信变化是否通过消息到达、邻居更新和协方差传播影响定位。所有图属于工程机制诊断图，权威数值以 `episode_metrics.csv`、`paired_contrasts.csv` 和 `audit_report.json` 为准。
+
+## 协同定位耦合受控实验（2026-08-24）
+
+项目新增 `run-localization-coupling-intervention`，用于在带宽动作链已经通过审计后，单独验证：
+
+```text
+已接收邻居消息 → Distributed EKF 协同融合 → 定位性能与 J_loc
+```
+
+该实验只使用冻结的 3 架无人机 Moderate validation 20 个 episode，不重新训练 MAPPO，也不使用 test。每个 episode 在完全相同的场景、seed、动作、通信、传感器和真实轨迹下重放两次：正常执行协同 EKF；保留全部通信与消息过程但禁止 EKF 消费邻居状态/UWB 对。episode 是独立统计单位，窗口数据仅用于诊断。
+
+PyCharm 脚本参数：
+
+```text
+run-localization-coupling-intervention --reference data/synthetic/python_sim_moderate_seed2026_formal/scale_3 --output data/synthetic/python_sim_localization_coupling_moderate_validation_seed2026 --split validation --bootstrap-samples 10000 --bootstrap-seed 2026
+```
+
+默认输出为：
+
+```text
+data/synthetic/python_sim_localization_coupling_moderate_validation_seed2026/
+logs/preliminary/python_sim_moderate_seed2026_formal/localization_coupling/
+plots/preliminary/python_sim_moderate_seed2026_formal/localization_coupling/
+```
+
+`SimulationConfig.cooperative_ekf_enabled` 默认为 `True`，因此不改变原训练、验证和测试入口。禁用时只阻断满足消息到达、UWB 有效、测量动作允许、新消息和更新周期等全部条件后的 EKF 融合；链路、消息缓冲、GAT 可见图、动作和物理状态仍按原模型运行。最终判断必须读取 `audit_report.json`，不能只凭图形判断算法有效。
+
+本次20个配对 validation episode 的实际审计结果为：
+
+- 正常协同组与原 validation 的定位估计和奖励逐值一致；两组的真实轨迹、障碍物、动作、链路和数据包事件逐值一致；
+- 正常协同组共有50次可执行邻居 UWB 更新并全部接受；禁用组接受0次、阻止50次，说明干预位置准确；
+- 正常协同组位置 RMSE 为0.25410 m，禁用组为0.25620 m，禁用减启用为0.00209 m，95% Bootstrap 区间为[0.00010, 0.00472] m；
+- 该差异方向符合“协同融合改善定位”，但远低于预设的0.05 m实际效应门槛，因此当前只能证明邻居信息确实进入并轻微改变 EKF 均值，不能证明协同定位具有足够工程收益；
+- `J_loc` 和位置协方差迹在两组间不变。当前相对测距更新为避免未知交叉相关导致虚假收缩，保留了保守协方差，因此本次干预主要影响状态均值；
+- 每个 episode 的协同更新机会中位数仅为1.5次，且 NEES 覆盖率很低，显示当前协同信息密度和滤波一致性表达仍需单独审计。
+
+当前决策门为 `localization_response_too_small_audit_ekf_update_strength`。下一步不调整奖励，也不直接比较 MAPPO 测量选择；应先检查相对测距增益、观测噪声、创新门限、邻居协方差传播以及协同更新机会密度，在保持配对场景合理的前提下确认协同定位能够产生具有实际意义的定位改善。
+
+## EKF更新强度与定位目标灵敏度审计（2026-08-24）
+
+项目新增只读入口 `run-ekf-update-strength-audit`。该入口重放同一组20个 Moderate validation episode，只记录相对 UWB 更新内部已经计算的创新、NIS、方差分解、Kalman增益、状态修正、协方差恢复和 `J_loc` 响应；不改变滤波公式、奖励、动作或随机数序列，也不使用 test。
+
+PyCharm 脚本参数：
+
+```text
+run-ekf-update-strength-audit --reference data/synthetic/python_sim_moderate_seed2026_formal/scale_3 --output data/synthetic/python_sim_ekf_update_strength_audit_seed2026 --split validation
+```
+
+输出位置：
+
+```text
+data/synthetic/python_sim_ekf_update_strength_audit_seed2026/
+logs/preliminary/python_sim_moderate_seed2026_formal/ekf_update_strength/
+plots/preliminary/python_sim_moderate_seed2026_formal/ekf_update_strength/
+```
+
+本次审计逐值复现了参考 validation，50次更新的方差与状态修正公式残差均为0。实际发现：
+
+- 只有13/20个 episode 包含协同更新，更新窗口占全部1000个窗口的4.7%，每个 episode 更新次数中位数为1.5，协同机会明显稀疏；
+- 位置修正量中位数为0.04725 m，并非“增益几乎为零”；
+- 未知交叉相关上界占有效测量方差的中位比例为66.59%，是方差预算中的主要部分；
+- 100%的相对测距更新在均值修正后恢复了更新前位置协方差，因此50次更新的 `J_loc` 变化全部为0。
+
+当前决策门为 `cooperative_update_opportunities_sparse_design_paired_density_intervention`。这说明当前首要问题是协同更新机会不足；同时已确认 `J_loc` 对现有保守相对测距更新存在结构性不敏感。下一步应先用配对受控实验合理提高更新机会，确认均值定位收益是否随更新密度增强；在此之前不调整奖励、不比较MAPPO测量选择，也不删除未知交叉相关保护。
+
+## 协同测量选择密度配对干预（2026-08-24）
+
+项目新增 `run-measurement-density-intervention`，用于单独验证：
+
+```text
+actor可见候选邻居 → 测量对象选择 → 消息/UWB门控 → EKF更新 → 定位性能与J_loc
+```
+
+实验只使用冻结的3架无人机 Moderate validation 20个 episode，不重新训练MAPPO、不使用test，也不改变带宽、速度、信道、UWB参数、EKF公式或奖励。每个episode配对重放原MAPPO测量动作和确定性轮换基线。轮换基线只从动作产生时actor已经可见的候选邻居中按无人机ID排序循环选择，不读取未来数据包成功、消息到达或仿真真值。
+
+PyCharm脚本参数：
+
+```text
+run-measurement-density-intervention --reference data/synthetic/python_sim_moderate_seed2026_formal/scale_3 --output data/synthetic/python_sim_measurement_density_moderate_validation_seed2026 --split validation --bootstrap-samples 10000 --bootstrap-seed 2026
+```
+
+默认输出：
+
+```text
+data/synthetic/python_sim_measurement_density_moderate_validation_seed2026/
+logs/preliminary/python_sim_moderate_seed2026_formal/measurement_density/
+plots/preliminary/python_sim_moderate_seed2026_formal/measurement_density/
+```
+
+`window_metrics.csv`和`gate_funnel.csv`记录从候选存在、选择非空、UWB有效、通信边有效、消息到达、更新周期、新数据包到EKF接受的完整门控漏斗。窗口仅用于机制诊断；配对差异和Bootstrap区间以episode为独立统计单位。该实验只判断测量选择过稀是否限制协同定位，不直接证明MAPPO优于基线。
+
+本次20个配对validation episode的实际结果为：
+
+- 原MAPPO重放与参考validation逐值一致；两组真实轨迹、障碍物、链路、数据包、带宽和速度动作的最大差异均为0；
+- 原MAPPO在存在候选邻居时只以4.53%的比例选择非空测量，轮换基线为100%；
+- 接受的协同EKF更新从平均2.50次/episode提高到64.35次/episode，配对增加61.85次，95% Bootstrap区间为[58.20, 65.35]，说明测量选择过稀确实是更新机会不足的直接原因；
+- 位置RMSE由0.25410 m降至0.24321 m，平均变化为-0.01090 m，但95% Bootstrap区间为[-0.02668, 0.00354] m，包含0且低于预设0.05 m实际效应门槛，因此不能证明高密度轮换测量稳定改善定位；
+- `J_loc`、位置协方差迹及全部通信KPI保持不变，符合“只改变测量选择”的配对设计，也再次确认当前保守协方差恢复使`J_loc`无法响应相对测距更新；
+- 门控漏斗显示轮换组在2963条候选可用动作中全部选择邻居，最终1287次更新全部被EKF接受；主要损失发生在UWB/有效边筛选以及0.8 s更新周期，而不是消息到达或创新拒绝。
+
+当前决策门为`updates_increased_but_localization_response_small_audit_measurement_quality`。这说明“MAPPO大量选择none”已经被确认，但盲目提高测量频率并没有形成稳定且具有实际意义的定位收益。下一阶段不应继续提高频率或修改奖励，而应在这些新增更新中比较LOS/NLOS、NIS、创新幅度、Kalman增益和更新前后真实误差，建立质量感知测量选择依据。
+
+## 协同EKF单次更新质量审计（2026-08-24）
+
+项目新增只读入口`run-cooperative-update-quality-audit`，对原MAPPO选择与actor可见轮换选择进行相同种子、场景和非测量动作的配对重放。真实位置只用于更新完成后的离线效果标签，不进入EKF、actor、critic或奖励。事件按固定1 mm门槛标记为有益、有害或近似无效，但统计推断仍以20个episode为独立单位，不能把更新事件作为独立样本。
+
+PyCharm脚本参数：
+
+```text
+run-cooperative-update-quality-audit --reference data/synthetic/python_sim_moderate_seed2026_formal/scale_3 --output data/synthetic/python_sim_cooperative_update_quality_audit_seed2026 --split validation --bootstrap-samples 10000 --bootstrap-seed 2026
+```
+
+默认输出：
+
+```text
+data/synthetic/python_sim_cooperative_update_quality_audit_seed2026/
+logs/preliminary/python_sim_moderate_seed2026_formal/cooperative_update_quality/
+plots/preliminary/python_sim_moderate_seed2026_formal/cooperative_update_quality/
+```
+
+实际审计精确复现了原组50次和轮换组1287次接受更新，所有配对不变量、公式闭合与episode-v1.3验证通过。轮换组中52.84%的更新有益、38.46%有害、8.70%近似无效，单次更新平均使真实位置误差降低0.00310 m；这解释了高密度测量整体收益很小：有益更新占优，但存在大量有害更新抵消收益。
+
+可执行期可见因素中发现：
+
+- NLOS更新覆盖20个episode、181次事件，episode平均误差变化为+0.03080 m，95% Bootstrap区间为[+0.01784, +0.04437] m；
+- 消息年龄大于0.5 s的更新覆盖10个episode、19次事件，episode平均误差变化为+0.06058 m，95% Bootstrap区间为[+0.02694, +0.10312] m；
+- 最低Kalman增益四分位和最低未知交叉上界比例四分位也与误差增加相关，但两者高度关联，当前只能作为诊断线索，不能单独解释为因果关系；
+- 未知交叉相关上界仍占有效测量方差约66.59%，且每次线性协方差缩减后都会恢复至更新前水平，因此`J_loc`不变是当前保守协方差机制的预期结果。
+
+当前决策门为`observable_quality_strata_predict_harm_design_quality_aware_mask`。下一步应只使用RSSI、SNR、预测丢包率、时延、AoI、队列、链路状态和已接收邻居不确定度等执行期可见量建立质量感知测量掩码，并与原MAPPO和轮换基线做新的配对干预；物理LOS/NLOS和真实误差只能用于离线评价，不能作为策略输入。
+
+## 执行期可见的质量感知测量选择（2026-08-24）
+
+项目新增`run-quality-aware-measurement-intervention`，用于比较原MAPPO测量选择、actor可见候选轮换选择和质量感知选择。该实验不修改EKF、奖励、信道或MAPPO参数，只替换`measurement_uav_id`，并保持场景、随机种子、带宽和速度动作一致。
+
+质量感知处理只使用动作产生时已经存在于局部观测中的RSSI、SNR、预测丢包率、时延、AoI、队列、当前链路状态和已接收邻居协方差。物理LOS/NLOS、真实位置误差、下一窗口数据包成功结果和未来消息到达时间仅允许作为离线评价标签，不能参与候选筛选或排序。
+
+所有筛选门限和归一化区间只从冻结参考运行的`train`目录拟合：RSSI和SNR采用训练集25%分位下限，丢包、时延、AoI和队列采用训练集75%分位上限；存在邻居协方差时同样使用训练集75%分位上限。validation只用于20个episode的配对评价，test继续封存。
+
+PyCharm脚本参数：
+
+```text
+run-quality-aware-measurement-intervention --reference data/synthetic/python_sim_moderate_seed2026_formal/scale_3 --output data/synthetic/python_sim_quality_aware_measurement_seed2026 --split validation --bootstrap-samples 10000 --bootstrap-seed 2026
+```
+
+默认输出：
+
+```text
+data/synthetic/python_sim_quality_aware_measurement_seed2026/
+logs/preliminary/python_sim_moderate_seed2026_formal/quality_aware_measurement/
+plots/preliminary/python_sim_moderate_seed2026_formal/quality_aware_measurement/
+```
+
+统计推断仍以episode为独立单位。`update_events.csv`中的有益、有害和近似无效标签只用于解释机制，不能把单次更新当作独立重复。最终后续方向以`audit_report.json`中的`decision_gate`为准；在结果通过之前，不把质量掩码接入MAPPO训练，也不宣称质量感知策略优于原算法。
+
+本次20个validation episode的实际配对结果为：原MAPPO、轮换和质量感知处理平均每个episode分别接受2.50、64.35和31.40次协同更新。质量感知处理相对轮换处理排除了绝大多数NLOS与陈旧更新，但接受更新数仅为轮换处理的48.80%，触发“训练门限偏严”决策门。
+
+质量感知处理相对轮换处理的有害更新比例平均下降0.02294，但95% Bootstrap区间为[-0.06454, 0.01776]；位置RMSE平均下降0.00761 m，但95%区间为[-0.02364, 0.00752] m，均不足以证明稳定改善。相对原MAPPO，质量感知处理的RMSE平均下降0.01851 m，95%区间为[-0.03370, -0.00597] m，但由于原MAPPO测量极少，该比较不能替代与高密度轮换基线的质量验证。
+
+因此，本阶段只能证明：执行期可见指标能够过滤NLOS和陈旧更新，并保持严格配对重放；尚不能证明当前硬门限质量选择优于轮换选择。下一步只能使用train数据重新设计较温和的质量筛选或排序规则，并在validation上重新评价；不得根据validation结果直接调门限，也不得提前接入MAPPO训练。
+
+## 软质量评分测量选择（2026-08-24）
+
+项目新增`run-soft-quality-measurement-intervention`，在不修改EKF、奖励、信道和MAPPO的条件下，对原MAPPO、候选轮换、硬门限质量选择和软质量评分选择进行20个validation episode的配对重放。软评分使用RSSI、SNR、预测丢包率、时延、AoI、队列和已接收邻居位置协方差迹，各项先用train四分位区间归一化，再采用预先固定的等权平均；仅保留`link_state=connected`基本条件，不再要求每项指标同时通过硬门限。
+
+`none`阈值冻结为train连接候选风险分数的90%分位数0.628251。若当前最佳候选风险超过该值才选择`none`。该规则没有读取validation或test结果，也没有使用物理LOS/NLOS、真实误差、未来通信成功或未来消息到达信息。
+
+PyCharm脚本参数：
+
+```text
+run-soft-quality-measurement-intervention --reference data/synthetic/python_sim_moderate_seed2026_formal/scale_3 --output data/synthetic/python_sim_soft_quality_measurement_seed2026 --split validation --bootstrap-samples 10000 --bootstrap-seed 2026
+```
+
+默认输出：
+
+```text
+data/synthetic/python_sim_soft_quality_measurement_seed2026/
+logs/preliminary/python_sim_moderate_seed2026_formal/soft_quality_measurement/
+plots/preliminary/python_sim_moderate_seed2026_formal/soft_quality_measurement/
+```
+
+实际结果表明，软评分组平均接受47.70次协同更新，是硬门限组31.40次的1.52倍、轮换组64.35次的74.13%。相对轮换组，有害更新比例从0.38476下降至0.33186，配对差异为-0.05289，95% Bootstrap区间为[-0.09524, -0.01275]；位置RMSE从0.24321 m下降至0.22573 m，配对差异为-0.01748 m，95%区间为[-0.03320, -0.00322]；位置误差P95下降0.05090 m，95%区间为[-0.09952, -0.01028]。NLOS更新比例下降0.14308，陈旧更新比例降至0。
+
+四组真实轨迹、障碍物、通信链路、数据包事件、带宽和速度动作的最大差异均为0，原MAPPO处理也精确复现参考validation结果。当前决策门为`soft_quality_effective_freeze_then_add_random_seeds`：软评分机制已通过单随机种子机制验证，但仍属于工程诊断证据。下一步应冻结评分规则，增加多个独立训练/评价随机种子确认稳定性；在此之前不接入MAPPO重新训练，也不使用封存test数据。
+
+## 冻结软质量规则的多随机种子验证（2026-08-24）
+
+项目新增`run-multiseed-soft-quality-validation`，固定3架无人机Moderate场景，对`2026、3035、4044、5053、6062`五个独立基础随机种子分别从头运行20个warm-up、100个MAPPO训练回合、20个validation回合和20个test回合。test数据只生成并封存，不参与软评分拟合、比较或决策。
+
+每个种子的软评分公式、等权规则、执行期可见信息边界和`none`判定规则保持不变；归一化尺度和train-q90阈值只在该种子的train数据中拟合。validation阶段仍比较原MAPPO、候选轮换、硬质量门限和软质量评分四种处理，episode是配对统计单位，更新事件和时间窗口不是独立重复。
+
+PyCharm脚本参数：
+
+```text
+run-multiseed-soft-quality-validation --output data/synthetic/python_sim_multiseed_soft_quality_seed2026 --seeds 2026 3035 4044 5053 6062 --steps 50 --warmup-episodes 20 --train-episodes 100 --validation-episodes 20 --test-episodes 20 --scenario-profile data/synthetic/scenario_screening_seed2026/selected_profiles/moderate.json --ekf-config data/synthetic/python_sim_calibration_seed2026_v4/selected_ekf_config.json --bootstrap-samples 10000 --bootstrap-seed 2026 --device cpu
+```
+
+输出包括每个种子的独立参考训练结果、四组validation干预数据以及：
+
+```text
+logs/preliminary/python_sim_multiseed_soft_quality_seed2026/
+├── seed_runs.csv
+├── treatment_means.csv
+├── seed_contrasts.csv
+├── cross_seed_summary.csv
+└── audit_report.json
+```
+
+决策门要求至少4/5个种子中软质量选择相对轮换选择同时改善位置RMSE和有害更新比例，并且两项跨种子Bootstrap区间均支持改善。通过后才进入“将质量评分接入MAPPO并重新训练”；未通过则先检查跨种子场景、归一化和阈值稳定性，不修改EKF、奖励、碰撞、GAT或软评分权重。
+
+本次五种子验证已经完成。相对`round_robin_candidate`，软质量选择在5/5个种子中同时降低位置RMSE和有害更新比例：位置RMSE配对差异均值为`-0.01419 m`，跨种子95% Bootstrap区间为`[-0.01884, -0.00858] m`；有害更新比例配对差异均值为`-0.04813`，区间为`[-0.05860, -0.03719]`。软质量选择平均少接受约`15.66`次协同更新，但同时将NLOS更新比例平均降低`0.14004`；这说明改善来自更谨慎的更新筛选，而不是单纯增加更新次数。25个episode-v1.3目录（5个参考目录和20个干预目录）均通过验证，全套93项测试通过，符号审计通过。
+
+该结果支持“软质量规则在当前3架无人机Moderate场景下具有初步跨种子稳定性”，但仍只是工程机制证据，不等于完整MAPPO算法优越性，也没有解决`J_{\mathrm{loc}}`结构、碰撞风险和安全/能耗权衡。下一步可以在保持规则冻结的前提下，将质量信息作为执行期测量动作掩码或候选约束接入MAPPO并重新训练；test数据仍保持封存。
+
+## 软质量机制正式接入 MAPPO（2026-08-25）
+
+项目新增 `run-quality-aware-mappo`，将已经冻结并通过五随机种子机制验证的软质量规则接入 MAPPO 的测量动作头。实验保留两个分支：
+
+```text
+baseline_mappo
+    → 原有 MAPPO actor；不接收测量质量特征
+
+quality_aware_mappo
+    → 仅测量动作头接收 measurement_quality_risk 和 measurement_quality_valid
+```
+
+质量向量按无人机 ID 对齐，只由当前局部观测中的 RSSI、SNR、预测丢包率、时延、AoI、队列、链路状态和已接收邻居协方差计算。每个随机种子先用 warm-up 观测拟合一次并冻结；validation/test 不参与拟合。带宽动作、速度动作、GAT、centralized critic、EKF、信道、奖励和碰撞模型均不改变。
+
+单种子联通 smoke：
+
+```text
+run-quality-aware-mappo --output data/synthetic/python_sim_quality_aware_mappo_smoke --seeds 2026 --steps 3 --warmup-episodes 2 --train-episodes 2 --validation-episodes 2 --test-episodes 2 --bootstrap-samples 100 --device cpu --force
+```
+
+正式五随机种子实验：
+
+```text
+run-quality-aware-mappo --output data/synthetic/python_sim_quality_aware_mappo_seed2026 --seeds 2026 3035 4044 5053 6062 --steps 50 --warmup-episodes 20 --train-episodes 100 --validation-episodes 20 --test-episodes 20 --scenario-profile data/synthetic/scenario_screening_seed2026/selected_profiles/moderate.json --ekf-config data/synthetic/python_sim_calibration_seed2026_v4/selected_ekf_config.json --bootstrap-samples 10000 --bootstrap-seed 2026 --device cpu
+```
+
+输出目录为：
+
+```text
+data/synthetic/python_sim_quality_aware_mappo_seed2026/
+    seed_2026/baseline_mappo/scale_3/
+    seed_2026/quality_aware_mappo/scale_3/
+    ...
+
+logs/preliminary/python_sim_quality_aware_mappo_seed2026/
+    episode_metrics.csv
+    treatment_means.csv
+    paired_contrasts.csv
+    cross_seed_summary.csv
+    seed_runs.csv
+    audit_report.json
+
+plots/preliminary/python_sim_quality_aware_mappo_seed2026/
+    quality_aware_mappo_comparison.png
+```
+
+`audit_report.json` 中的 `audit_ok` 只表示输出、schema、分支和有限性检查通过；`decision_supported` 才表示五随机种子下位置 RMSE 与有害更新比例同时满足预设改善门槛。test 数据会生成但封存，不能用于规则拟合、模型选择或训练调参。该实验不自动证明最终算法优越性，也不扩展到5/7架无人机、碰撞风险或能耗权衡。
+
+## 目标函数—定位性能—通信开销一致性审计（2026-08-25）
+
+项目新增只读入口`run-objective-sensitivity-audit`，用于检查质量感知MAPPO五随机种子结果中的定位RMSE、协方差型定位代价`J_loc`、通信代价`J_com`、核心目标`J_t`和团队奖励是否方向一致。审计只读取`validation`目录，不读取或使用`test`目录，不重新训练、不重放环境，也不修改EKF、奖励、GAT、信道和碰撞模型。真实位置只用于离线计算RMSE和位置误差P95，不能用于构造目标、奖励或策略输入。
+
+PyCharm脚本参数：
+
+```text
+run-objective-sensitivity-audit --reference data/synthetic/python_sim_quality_aware_mappo_seed2026 --split validation --bootstrap-samples 10000 --bootstrap-seed 2026 --force
+```
+
+输出为：
+
+```text
+logs/preliminary/python_sim_quality_aware_mappo_seed2026/objective_sensitivity/
+├── episode_sensitivity.csv
+├── seed_sensitivity.csv
+├── metric_correlations.csv
+└── audit_report.json
+
+plots/preliminary/python_sim_quality_aware_mappo_seed2026/objective_sensitivity/
+└── objective_sensitivity.png
+```
+
+五个训练随机种子、每个分支20个validation episode均被读取，统计推断单位仍为训练随机种子，不把窗口或单次EKF更新当作独立样本。审计确认：
+
+- `J_t=J_loc+J_com`最大绝对误差约`8.0×10^-10`，奖励闭合最大绝对误差约`1.0×10^-9`，公式实现闭合；
+- quality-aware相对baseline的位置RMSE平均下降`0.01167 m`，4/5个种子改善，但95% Bootstrap区间为`[-0.03363, 0.01472] m`，尚不支持稳定改善；
+- `J_loc`平均增加`0.0003305`，相对于baseline约`0.34475`的1%实用容差`0.003447`属于基本不变；协方差迹平均增加`0.459`，而RMSE下降，说明当前协方差型`J_loc`不能反映这次定位均值改善；
+- `J_com`平均增加`0.03387`，95%区间为`[0.02720, 0.04025]`；同时丢包率平均增加`0.02968`，连通性下降`0.01587`，团队奖励平均下降`0.03436`且95%区间不跨0，质量感知MAPPO的定位收益伴随明确通信代价；
+- `audit_ok=true`，但`decision_supported=false`；当前决策门为`objective_break_jloc_insensitive_to_rmse`，不是算法有效性通过。
+
+因此，当前不扩展5/7架无人机，也不根据本次validation结果调奖励权重或修改EKF。下一步应先设计不使用真实误差的执行期不确定度代理，并单独控制测量带来的通信开销，再进行新的配对验证；test数据继续封存。
+
+## 执行期预期信息增益代理审计（2026-08-25）
+
+项目新增只读入口`run-execution-uncertainty-proxy-audit`，用于建立不依赖真实误差的定位不确定度代理。该阶段只读取每个随机种子的`baseline_mappo/train`拟合尺度，并读取两个分支的`validation`候选邻居；不打开`test`目录，不重新训练MAPPO，也不修改EKF、奖励、GAT、信道或碰撞模型。
+
+代理使用本机估计位置/协方差、已接收邻居估计与协方差（不可见时使用训练集统计回退）、UWB测量标准差、AoI/消息年龄、RSSI、SNR、预测丢包率、预测时延、队列和当前链路状态。真实位置、真实距离、LOS/NLOS标签、未来消息结果和`central_state_json`均被排除。validation中的位置误差仅作为离线解释标签。
+
+PyCharm脚本参数：
+
+```text
+run-execution-uncertainty-proxy-audit --reference data/synthetic/python_sim_quality_aware_mappo_seed2026 --force
+```
+
+输出为：
+
+```text
+logs/preliminary/python_sim_quality_aware_mappo_seed2026/execution_uncertainty_proxy/
+├── proxy_parameters.json
+├── candidate_proxy.csv
+├── episode_proxy_summary.csv
+├── seed_proxy_summary.csv
+├── proxy_strata.csv
+└── audit_report.json
+
+plots/preliminary/python_sim_quality_aware_mappo_seed2026/execution_uncertainty_proxy/
+└── execution_uncertainty_proxy.png
+```
+
+本次五种子validation审计结果为：代理字段有效率`100%`，多候选窗口中具有非零代理差异的比例约`97.53%`，排序确定性检查通过，训练/validation隔离和test封存检查通过；但高风险分层的离线定位误差没有呈现预设的非下降趋势。因此`audit_ok=false`，当前不能进入预算受控干预，也不能将该代理接入MAPPO。这个结果不是代码联通失败，而是说明当前代理与定位误差之间的解释力尚未被验证；下一步应先修正代理构造或分层定义，再重新审计。
+
+## 执行期信息增益代理目标对齐审计（2026-08-25）
+
+项目新增只读入口`run-execution-uncertainty-proxy-alignment-audit`，用于把执行期预期信息增益代理与它真正预测的单次测量收益对齐。该审计继续只用每个随机种子的`baseline_mappo/train`拟合尺度，并读取两个分支的`validation`候选邻居和协同更新诊断；不读取`test`，不重放环境，不重新训练MAPPO，也不修改EKF、奖励、GAT、信道或碰撞模型。
+
+本次对齐标签采用线性协方差减少量：
+
+```text
+Delta P_linear = trace(P_before) - trace(P_after_linear)
+```
+
+其中真实位置误差变化和LOS/NLOS仅作为validation离线诊断标签，不能参与代理拟合、候选排序、动作选择或模型更新。审计同时记录最终保守协方差恢复量、状态/位置修正量、NIS、消息年龄、未知交叉相关上界和更新接受状态。单次更新只用于机制解释，统计独立单位仍是seed和episode。
+
+PyCharm脚本参数：
+
+```text
+run-execution-uncertainty-proxy-alignment-audit --reference data/synthetic/python_sim_quality_aware_mappo_seed2026 --bootstrap-samples 10000 --bootstrap-seed 2026 --force
+```
+
+输出为：
+
+```text
+logs/preliminary/python_sim_quality_aware_mappo_seed2026/execution_uncertainty_proxy_alignment/
+├── proxy_alignment_events.csv
+├── proxy_alignment_episode_summary.csv
+├── proxy_alignment_seed_summary.csv
+├── proxy_alignment_strata.csv
+├── proxy_alignment_correlations.csv
+└── audit_report.json
+
+plots/preliminary/python_sim_quality_aware_mappo_seed2026/execution_uncertainty_proxy_alignment/
+└── proxy_alignment.png
+```
+
+本次实际审计读取五个训练随机种子、两个分支的validation候选记录，共`53,822`条候选记录，匹配`3,503`条已接受协同更新。代理字段和更新字段均有限，线性协方差减少量公式闭合，训练/validation隔离、test封存、原始数据不变和“更新事件不作为独立重复”检查均通过。低风险分层的平均线性协方差减少量高于高风险分层，且低风险有害更新比例不高于高风险分层，因此`audit_ok=true`、`decision_supported=true`，当前代理可以进入预算受控配对干预。
+
+该结论的边界是：代理获得了与线性协方差收益一致的初步分层支持，但散点相关仍较弱，不能解释为已经证明真实定位RMSE或论文最终算法有效；下一步只做固定预算的`recorded_mappo`、无预算信息增益和预算受控信息增益三组validation配对实验，继续封存test，不修改核心模型。
+
+## 预算受控的信息增益配对干预（validation-only，2026-08-25）
+
+项目新增`run-information-gain-budget-intervention`，以五个随机种子的`baseline_mappo`分支为共同参考，配对重放validation数据。三种处理只替换`measurement_uav_id`：
+
+```text
+recorded_mappo
+    → 保留baseline原始测量选择
+unconstrained_information_gain
+    → 从当前可见候选中选择执行期信息增益代理最大的邻居，不设测量上限
+budgeted_information_gain
+    → 使用同一排序，但每个seed、每架无人机、每个validation episode使用train集baseline平均测量次数取整后的固定预算
+```
+
+信息增益代理只使用估计状态/协方差、已接收邻居信息、UWB测量噪声、当前候选链路质量、预测丢包/时延、AoI、队列和消息年龄；不使用真实位置、真实误差、LOS/NLOS真值、实际成功结果或未来消息。训练集只用于每个seed的代理尺度和测量预算拟合，validation只用于配对评价，test不读取。
+
+PyCharm脚本参数：
+
+```text
+run-information-gain-budget-intervention --reference data/synthetic/python_sim_quality_aware_mappo_seed2026 --reference-branch baseline_mappo --output data/synthetic/python_sim_information_gain_budget_intervention_seed2026 --split validation --bootstrap-samples 10000 --bootstrap-seed 2026 --force
+```
+
+输出包括：
+
+```text
+data/synthetic/python_sim_information_gain_budget_intervention_seed2026/
+    seed_2026/{recorded_mappo,unconstrained_information_gain,budgeted_information_gain}/scale_3/
+    ...
+
+logs/preliminary/python_sim_quality_aware_mappo_seed2026/information_gain_budget_intervention/
+    proxy_parameters.json
+    measurement_budgets.csv
+    window_metrics.csv
+    update_events.csv
+    episode_metrics.csv
+    seed_metrics.csv
+    paired_contrasts.csv
+    budget_usage.csv
+    audit_report.json
+
+plots/preliminary/python_sim_quality_aware_mappo_seed2026/information_gain_budget_intervention/
+    information_gain_budget_intervention.png
+```
+
+统计独立单位是五个base seed；episode用于配对，窗口和单次EKF更新仅作机制诊断。该实验不重新训练MAPPO，不修改EKF、奖励、GAT、信道、碰撞和能耗模型。其目的首先是判断“定位收益—通信开销”权衡是否真实存在；只有预算受控处理在不增加通信开销的情况下改善定位指标，才考虑把相应信息接入MAPPO。碰撞风险和能耗仍在通信—定位主线完成后单独验证。
+
+本次五种子validation-only运行已完成，`audit_ok=true`且`decision_supported=true`。`recorded_mappo`与baseline validation逐项重放一致；真实轨迹、障碍物、链路、数据包、带宽和速度动作在三种处理之间保持一致，预算上限和episode-v1.3校验通过，test未读取。相对于`recorded_mappo`，无预算信息增益组的平均位置RMSE差异为`-0.02690 m`（Bootstrap 95% CI：`[-0.03176, -0.02206]`），预算受控组为`-0.02121 m`（Bootstrap 95% CI：`[-0.02657, -0.01586]`）。
+
+但两组的`J_loc`、`J_com`、团队奖励及通信KPI在本实验中均未发生差异；这是因为方案按设计只替换测量无人机，不改变带宽、信道随机过程和通信过程。因此本次结果支持“预算受控信息增益选择在固定通信条件下具有初步定位收益”，不支持宣称已经证明完整的通信—定位开销权衡，也不等同于重新训练后的MAPPO策略优越性。当前`J_loc`对RMSE改善不敏感的问题仍保留；若要研究真实通信开销权衡，后续必须单独建立测量消息对带宽、队列或通信资源的显式影响，而不能从本次固定通信重放中推断。
+
+## 测量消息通信开销验证（validation-only，2026-08-25）
+
+为验证“测量选择是否真正占用通信资源”，项目新增默认关闭的`measurement_overhead_enabled`机制。每次选择一个有效潜在邻居时，向对应发送边加入一个等效的512字节数据包负载；该负载进入队列，并影响速率、丢包、时延、AoI和下一时刻队列。该机制不是完整MAC或请求—响应协议，只用于第一版通信开销机制验证；EKF消息到达语义、运动、带宽动作、速度动作、奖励和核心模型均未改变。旧实验默认关闭该开关，因此结果保持兼容。
+
+项目新增`run-measurement-overhead-intervention`，使用五个随机种子的`baseline_mappo` validation分支配对比较`recorded_mappo`、`unconstrained_information_gain`和`budgeted_information_gain`，并额外运行关闭开关的`recorded_mappo_no_overhead`控制重放。训练集只用于信息增益尺度和预算拟合，validation用于机制评价，test未读取；统计独立单位为base seed，时间窗口和EKF事件不作为独立样本。
+
+PyCharm脚本参数：
+
+```text
+run-measurement-overhead-intervention --reference data/synthetic/python_sim_quality_aware_mappo_seed2026 --reference-branch baseline_mappo --output data/synthetic/python_sim_measurement_overhead_intervention_seed2026 --split validation --bootstrap-samples 10000 --bootstrap-seed 2026 --force
+```
+
+结果位于：
+
+```text
+data/synthetic/python_sim_measurement_overhead_intervention_seed2026/
+logs/preliminary/python_sim_quality_aware_mappo_seed2026/measurement_overhead_intervention/
+plots/preliminary/python_sim_quality_aware_mappo_seed2026/measurement_overhead_intervention/
+```
+
+本次审计报告为`audit_ok=true`、`decision_supported=true`，控制重放与原validation逐项一致，三种处理的真实轨迹、障碍物、带宽和速度动作一致，预算上限、开销负载对应关系、episode-v1.3验证和test封存检查均通过。相对于开启开销的`recorded_mappo`，无预算信息增益组位置RMSE平均降低`0.01414 m`（95% Bootstrap CI：`[-0.01946,-0.01022]`），但`J_com`平均增加`0.01139`（CI：`[0.00213,0.02066]`），同时团队奖励下降；这明确暴露了定位收益—通信开销权衡。预算受控组位置RMSE平均降低`0.00757 m`（CI：`[-0.01394,-0.00273]`），`J_com`平均变化为`-0.00138`且区间跨零，因此只能称为固定预算下的初步定位收益，不能宣称已经完成最终MAPPO算法证明。
+
+本实验仍是validation-only机制证据，不是论文最终结果，也不代表完整无线MAC实现。`J_loc`在本实验中保持不变，说明现有协方差型定位代价对定位均值改善仍不敏感；碰撞风险、能耗权衡、5/7架无人机扩展和重新训练后的策略优越性仍需后续单独验证。
+
+## 通信开销条件下的 MAPPO 联合优化训练（2026-08-25）
+
+为验证“测量动作—通信队列—通信KPI—MAPPO策略”这一完整链路，质量感知MAPPO训练入口新增了`measurement_overhead_enabled`开关。开启时，两个训练分支的每次有效非空测量选择都会向对应通信边加入一个等效的512字节队列负载；该负载进入队列、丢包、时延和AoI计算。EKF、GAT、信道公式、奖励公式、带宽动作、速度动作和软质量规则保持不变，旧配置默认关闭开关，因此历史实验结果不被覆盖。
+
+PyCharm中的正式命令为：
+
+```text
+run-quality-aware-mappo --output data/synthetic/python_sim_quality_aware_mappo_overhead_seed2026 --seeds 2026 3035 4044 5053 6062 --steps 50 --warmup-episodes 20 --train-episodes 100 --validation-episodes 20 --test-episodes 20 --scenario-profile data/synthetic/scenario_screening_seed2026/selected_profiles/moderate.json --ekf-config data/synthetic/python_sim_calibration_seed2026_v4/selected_ekf_config.json --measurement-overhead-enabled --device cpu --force
+```
+
+正式训练前已完成3架无人机、seed=2026的smoke检查：warm-up 2回合、train/validation/test各5回合；baseline和quality-aware两个分支均生成`episode-v1.3`数据，`measurement_overhead.csv`已写入每个episode，开销开关在配置和环境中均为`true`，结构审计为`audit_ok=true`。由于smoke只有一个随机种子，`decision_supported=false`是预期结果，不能用于论文算法结论。
+
+正式五种子结果将写入：
+
+```text
+data/synthetic/python_sim_quality_aware_mappo_overhead_seed2026/
+logs/preliminary/python_sim_quality_aware_mappo_overhead_seed2026/
+plots/preliminary/python_sim_quality_aware_mappo_overhead_seed2026/
+```
+
+正式验收只使用五个随机种子作为独立统计单位，并分别检查位置RMSE、`J_loc`、`J_com`、团队奖励、测量次数、512字节等效负载、丢包率、时延、AoI、连通性、有害协同更新比例、碰撞率和能耗。只有在两个分支的结构审计、episode-v1.3验证和训练/验证/测试隔离均通过后，才根据配对置信区间判断质量感知MAPPO是否学会通信—定位权衡；在此之前不扩展5/7架无人机，也不宣称最终算法有效。
+
+本次正式五种子训练已完成。结果目录为：
+
+```text
+data/synthetic/python_sim_quality_aware_mappo_overhead_seed2026/
+logs/preliminary/python_sim_quality_aware_mappo_overhead_seed2026/
+plots/preliminary/python_sim_quality_aware_mappo_overhead_seed2026/
+```
+
+结构验收结果：`audit_ok=true`、全部10个训练分支均开启`measurement_overhead_enabled=true`，每个分支均包含140个episode（20个warm-up、100个train、20个validation、20个test），每个episode均写出`measurement_overhead.csv`，validation schema检查通过，test已生成但未用于选择。全量测试为`110 passed`，符号审计通过。
+
+算法判定结果：`decision_supported=false`。validation中，quality-aware相对于baseline的位置RMSE在5个种子中仅有3个改善，有害更新比例仅有2个下降；RMSE配对差异均值为`-0.01431 m`，Bootstrap 95% CI为`[-0.03035, 0.00374]`；有害更新比例差异均值为`+0.00198`，Bootstrap 95% CI为`[-0.10622, 0.11320]`。两个区间均跨越0，且未达到预设的4/5种子改善门槛。因此当前结论是：通信开销机制已成功接入并完成可重复的3架无人机Moderate场景正式验证，但尚不能证明质量感知MAPPO稳定优于baseline，也不能宣称已经学会通信—定位联合权衡。
+
+validation中还观察到`J_com`平均增加约`0.02118`，团队奖励平均下降约`0.02067`；`J_loc`平均变化约`-0.00007`，仍显示对定位均值改善不敏感。test结果仅作为封存后的最终报告材料，不参与上述判定。下一步应先检查质量特征是否真正改变测量动作概率、`none`选择率与队列开销响应，再决定是否调整测量动作分支；暂不扩展5/7架无人机、不修改EKF、奖励、GAT、信道或碰撞模型。
+
+## 质量感知 MAPPO 动作—通信开销机制审计（2026-08-26）
+
+本阶段新增只读入口`run-policy-mechanism-audit`，不重新训练、不改变EKF、奖励、GAT、信道或碰撞模型。它从已有五种子、3架无人机Moderate开销实验的冻结checkpoint重放validation，记录每个候选邻居的质量风险、有效性掩码、完整测量动作概率向量、`none`概率、实际选择以及512字节等效队列开销。test目录不读取，episode schema不修改；统计独立单位仍为训练随机种子。
+
+PyCharm脚本参数：
+
+```text
+run-policy-mechanism-audit --reference data/synthetic/python_sim_quality_aware_mappo_overhead_seed2026 --output logs/preliminary/python_sim_quality_aware_mappo_overhead_seed2026/policy_mechanism_audit --plots-output plots/preliminary/python_sim_quality_aware_mappo_overhead_seed2026/policy_mechanism_audit --seeds 2026 3035 4044 5053 6062 --split validation --bootstrap-samples 10000 --bootstrap-seed 2026 --device cpu --force
+```
+
+输出为：
+
+```text
+logs/preliminary/python_sim_quality_aware_mappo_overhead_seed2026/policy_mechanism_audit/
+plots/preliminary/python_sim_quality_aware_mappo_overhead_seed2026/policy_mechanism_audit/
+```
+
+五种子审计结果为`audit_ok=true`：所有重放动作和队列事件逐项一致，质量模型均来自warm-up，29,763条诊断轨迹有限且未包含真值/未来字段。质量感知分支的`none`选择率相对baseline在3/5个种子明显下降，同时测量次数与等效负载上升；对应决策为`policy_overmeasurement`，而非算法有效性通过。`actor_response_status`为`not_responsive`，说明当前候选级风险—概率关系尚未形成稳定负相关，不能直接声称策略已经学会按风险选择邻居。下一步应在不改核心模型的前提下，检查质量特征的归一化、方向和测量动作头响应；若确认策略确实过度测量，再设计固定预算或显式测量通信成本约束并重新训练。 
+
+## 质量特征语义与 MAPPO 动作响应审计（validation-only，2026-08-26）
+
+本阶段新增只读入口`run-quality-feature-sensitivity-audit`，针对上一阶段发现的风险—动作概率关系不稳定问题，分离检查三件事：风险定义是否单调、缺失邻居协方差是否按最差风险处理、quality-aware测量动作头是否对风险反事实输入产生预期响应。反事实扫描只把同一执行期观测中的一个候选风险依次替换为`0、0.25、0.50、0.75、1.00`，保持图状态、动作掩码、带宽和速度输入不变；不执行反事实动作，不读取真实位置、真实误差、LOS/NLOS、未来结果或test数据。
+
+PyCharm脚本参数：
+
+```text
+run-quality-feature-sensitivity-audit --reference data/synthetic/python_sim_quality_aware_mappo_overhead_seed2026 --output logs/preliminary/python_sim_quality_aware_mappo_overhead_seed2026/quality_feature_sensitivity --plots-output plots/preliminary/python_sim_quality_aware_mappo_overhead_seed2026/quality_feature_sensitivity --seeds 2026 3035 4044 5053 6062 --split validation --device cpu --force
+```
+
+输出为：
+
+```text
+logs/preliminary/python_sim_quality_aware_mappo_overhead_seed2026/quality_feature_sensitivity/
+├── feature_semantics.csv
+├── counterfactual_policy_response.csv
+├── missing_value_audit.csv
+├── seed_summary.csv
+└── audit_report.json
+
+plots/preliminary/python_sim_quality_aware_mappo_overhead_seed2026/quality_feature_sensitivity/
+└── quality_feature_sensitivity.png
+```
+
+统计独立单位仍是base seed；validation episode只用于配对机制诊断，test完全封存。该审计不重新训练、不修改原始episode、checkpoint、EKF、奖励、GAT、信道或碰撞模型。只有在风险语义、缺失值处理和反事实动作响应均通过后，才考虑调整测量动作头接口或开展小规模重新训练；在审计结论形成前，不扩展5/7架无人机。
+
+全量五种子审计已完成。结构检查全部通过：`feature_semantics_ok=true`、`missing_value_handling_ok=true`、`baseline_quality_invariant=true`、`quality_features_present=true`、`replay_actions_exact=true`、`all_rows_finite=true`、`all_validation_only=true`；质量模型均来自warm-up，反事实动作未执行，test数据未读取。共生成218,780条反事实策略响应记录和58,637条缺失值诊断记录。
+
+机制结论为`decision=actor_direction_unstable`、`decision_supported=false`。质量感知分支按种子呈现预期“风险升高、候选概率下降”的比例依次为`1.000、0.399、0.379、0.568、0.264`，只有2026号种子稳定满足该方向；其余种子方向不稳定。baseline对质量输入的最大概率变化为0，说明分支隔离有效；风险定义和缺失协方差最差回退也均通过。因此当前问题定位为“风险语义本身正确，但quality-aware actor尚未稳定利用该特征”，不能据此宣称质量感知策略有效。
+
+本次回归测试为`120 passed`，`main.py audit-symbols`通过（234个规范符号、10个遗留符号、无重复和缺失登记）。下一步只应调整或隔离测量动作头的质量特征接口并做单种子smoke；在此之前不重新进行五种子正式实验，不修改EKF、奖励、GAT、信道和碰撞模型，也不扩展到5/7架无人机。
+
+## 质量感知测量动作头单调性修正与单种子Smoke（2026-08-26）
+
+针对上一阶段发现的“质量风险已经进入actor，但候选风险—动作概率关系不稳定”问题，本阶段只修改quality-aware测量动作head，不改变baseline、EKF、奖励、GAT、信道、碰撞模型或episode-v1.3。新增固定的候选logit风险惩罚：
+
+```text
+z'_k = z_k - lambda_q * q_k * v_k
+```
+
+其中`lambda_q = 1.0`仅用于`quality_aware_mappo`，`q_k`为执行期可见候选风险，`v_k`为质量有效性；`none`动作logit和原有动作掩码不变。baseline分支强制使用`lambda_q = 0`，因此即使旧调用方传入非零配置，也不会改变baseline行为。旧checkpoint缺少该字段时默认兼容为0；新的quality-aware实验必须从头训练。
+
+同时在`measurement_quality.jsonl`中记录原始logit、风险惩罚、调整后logit、候选概率、`none`概率、惩罚系数和分支名，便于区分“固定单调机制”与“网络学习响应”。
+
+单种子Smoke命令为：
+
+```text
+run-quality-aware-mappo --output data/synthetic/python_sim_quality_aware_mappo_quality_head_fix_smoke --seeds 2026 --steps 50 --warmup-episodes 2 --train-episodes 5 --validation-episodes 5 --test-episodes 5 --measurement-overhead-enabled --quality-logit-penalty 1.0 --bootstrap-samples 100 --device cpu --force
+```
+
+结果保存于：
+
+```text
+data/synthetic/python_sim_quality_aware_mappo_quality_head_fix_smoke/
+logs/preliminary/python_sim_quality_aware_mappo_quality_head_fix_smoke/
+plots/preliminary/python_sim_quality_aware_mappo_quality_head_fix_smoke/
+```
+
+Smoke结构检查为`audit_ok=true`；baseline和quality-aware两个分支均完成2个warm-up、5个train、5个validation和5个test回合，开启512字节测量开销，生成episode-v1.3和诊断日志。由于只有一个随机种子，`decision_supported=false`是预期结果，不能作为论文级算法结论。
+
+随后对同一Smoke结果执行validation-only质量特征敏感性审计。结果为：
+
+- `feature_semantics_ok=true`、`missing_value_handling_ok=true`、`baseline_quality_invariant=true`、`replay_actions_exact=true`、`all_rows_finite=true`；
+- test未读取，反事实风险扫描不执行环境动作；
+- baseline在风险从0变化到1时候选概率变化为0；
+- quality-aware分支候选概率的预期单调方向比例为1.0，候选概率端点平均变化约`-0.20724`，`none`概率端点平均变化约`+0.14420`；
+- `audit_ok=true`，但这只是单种子机制验证，不代表五随机种子性能改善。
+
+本阶段全量测试为`123 passed`，`main.py audit-symbols`通过（234个规范符号、10个遗留符号、无重复或缺少登记信息）。下一步只有在该单种子反事实审计通过后，才重新执行冻结系数下的五随机种子正式验证；在此之前不扩展5/7架无人机，也不修改EKF、奖励、GAT、信道、碰撞模型或定位目标。
+
+## 固定风险惩罚后的五随机种子正式验证（2026-08-26）
+
+针对质量感知测量动作头，使用固定`lambda_q=1.0`完成了3架无人机Moderate场景的五随机种子正式验证。两个分支均开启测量通信开销，唯一预设差异为：`baseline_mappo`使用惩罚系数`0`，`quality_aware_mappo`使用惩罚系数`1.0`；两组均使用20个warm-up、100个train、20个validation和20个test回合。结果保存于：
+
+```text
+data/synthetic/python_sim_quality_aware_mappo_quality_head_fix_seed2026/
+logs/preliminary/python_sim_quality_aware_mappo_quality_head_fix_seed2026/
+plots/preliminary/python_sim_quality_aware_mappo_quality_head_fix_seed2026/
+```
+
+结构验收通过：10个`scale_3`分支全部为`episode-v1.3`，每个分支包含140个episode，所有episode验证通过；两个分支的配置分别记录了`measurement_overhead_enabled=true`以及惩罚系数`0/1.0`；test数据已生成但未参与方案选择。正式训练的结构审计为`audit_ok=true`。
+
+算法有效性门槛未通过，`decision_supported=false`。validation中，quality-aware的定位RMSE在5个种子中有4个改善，但配对差异均值为`-0.00761 m`，Bootstrap 95% CI为`[-0.01651, 0.00479]`，区间跨越0；有害更新比例只有2/5个种子下降，配对差异均值为`+0.03816`，CI为`[-0.07897, 0.14613]`，同样跨越0。位置误差P95这一辅助指标的区间支持改善，但不足以替代预先定义的RMSE和有害更新双重门槛。与此同时，`J_com`平均增加约`0.00533`，连通性平均下降约`0.01227`，因此不能宣称质量感知MAPPO已经稳定优于baseline或已经学会完整的通信—定位联合权衡。
+
+随后完成了同一批五种子的validation-only质量特征敏感性审计，输出为：
+
+```text
+logs/preliminary/python_sim_quality_aware_mappo_quality_head_fix_seed2026/quality_feature_sensitivity/
+plots/preliminary/python_sim_quality_aware_mappo_quality_head_fix_seed2026/quality_feature_sensitivity/
+```
+
+该审计确认：`feature_semantics_ok=true`、`missing_value_handling_ok=true`、`baseline_quality_invariant=true`、`quality_features_present=true`、`replay_actions_exact=true`、`all_rows_finite=true`、`all_validation_only=true`；质量模型均来自warm-up，反事实动作未执行，test未读取。五个种子下，固定风险惩罚的反事实候选概率均呈单调不升，`none`概率呈单调不降，说明动作头的局部单调机制已按设计生效。但审计决策仍为`scene_confounding_or_observed_correlation_instability`、`decision_supported=false`：反事实单调性是机制正确性证据，不等于重新训练后的论文级性能改善证据。
+
+本轮不扩展到5/7架无人机，不修改EKF、奖励、GAT、信道、碰撞模型或定位目标。后续应先基于这些结果检查质量感知分支的实际测量概率、`none`选择率、测量负载和通信代价；在确认策略行为与机制目标一致前，不应再次调大惩罚系数或宣称算法有效。
+
+## 最新五种子动作—通信开销机制闭环审计（2026-08-26）
+
+针对固定风险惩罚后的最新正式结果，完成了validation-only的动作—通信开销机制审计。审计使用已有checkpoint和episode，不重新训练、不读取test、不修改原始数据。输出为：
+
+```text
+logs/preliminary/python_sim_quality_aware_mappo_quality_head_fix_seed2026/policy_mechanism_audit/
+plots/preliminary/python_sim_quality_aware_mappo_quality_head_fix_seed2026/policy_mechanism_audit/
+```
+
+结构验收全部通过：`audit_ok=true`、`feature_injection_ok=true`、`quality_models_warmup_only=true`、`trace_rows_finite=true`、`replay_actions_exact=true`、`replay_queue_events_exact=true`、`all_validation_only=true`，共记录`29,682`条候选级诊断轨迹，未发现禁止字段。说明质量特征确实进入quality-aware actor，512字节测量负载也确实进入队列重放链路。
+
+机制结果为：`actor_response_status=responsive`，5个随机种子的候选风险—测量概率相关性均达到预设负相关阈值；baseline与quality-aware的动作和队列事件均能精确重放。实际测量率具有明显种子差异：quality-aware相对baseline的测量次数分别为`163/165`、`1187/440`、`264/2104`、`30/2692`和`1683/2128`。只有seed=3035被判定为明显过度测量，因此总体决策为`statistical_evidence_insufficient`、`decision_supported=false`，不是“特征未使用”或“通信队列断裂”。
+
+当前结论是：固定风险惩罚的局部动作机制和通信开销链路均已验证，但策略行为尚未跨场景/种子稳定，不能立即加入新的测量预算或继续调大惩罚系数。下一步应冻结当前代码和`lambda_q=1.0`，基于预注册的新场景或随机种子重复机制审计；在获得稳定的测量率、通信代价和定位收益关系前，不扩展5/7架无人机，也不修改EKF、奖励、GAT或信道模型。
+
+## 新增五随机种子复现实验（7071、8080、9099、10118、11127，2026-08-26）
+
+为检验固定`lambda_q=1.0`的质量感知测量动作头是否具有跨随机种子的可重复性，新增一组独立随机种子复现实验。实验使用3架无人机Moderate场景，`baseline_mappo`与`quality_aware_mappo`均开启512字节测量通信开销，配置为20个warm-up、100个train、20个validation和20个test回合；结果没有覆盖旧的五种子目录：
+
+```text
+data/synthetic/python_sim_quality_aware_mappo_quality_head_fix_replication_seedset_7071_11127/
+logs/preliminary/python_sim_quality_aware_mappo_quality_head_fix_replication_seedset_7071_11127/
+plots/preliminary/python_sim_quality_aware_mappo_quality_head_fix_replication_seedset_7071_11127/
+```
+
+10个`scale_3`分支均完成运行并通过`episode-v1.3`验证，每个分支包含140个episode。随后完成validation-only的动作—通信开销机制审计：`audit_ok=true`，动作重放和队列事件重放均无差异，质量模型均来自warm-up，test未用于审计或方案选择，生成了29,154条候选级诊断轨迹。
+
+复现实验的算法判定为`decision=statistical_evidence_insufficient`、`decision_supported=false`。quality-aware actor在5个新种子中均表现出预期的风险—候选测量概率负相关，但实际测量行为不稳定：部分种子测量次数减少，部分种子增加，且仅1/5个种子的定位RMSE改善、仅1/5个种子的有害更新比例下降；跨种子配对区间支持不足。因此当前只能确认“质量特征—动作概率—队列开销”链路存在且可审计，不能宣称质量感知MAPPO已经稳定改善定位或完成联合优化。
+
+本次复现实验不修改`lambda_q`、EKF、奖励、GAT、信道、碰撞模型或无人机规模。另：批量报告中的`branch_configs_equal_except_variant=false`来自审计比较器未排除预期的`measurement_quality_logit_penalty`字段；逐项核对表明两分支除预期的分支名、惩罚系数和输出路径外，其余物理模型及训练配置一致。该报告字段属于审计器待改进项，不应解释为实验物理配置不一致。
+
+## 开启通信开销的预算受控信息增益干预（7071、8080、9099、10118、11127，2026-08-26）
+
+为验证“信息增益测量选择—512字节队列负载—通信KPI—定位收益”之间的权衡，本轮在新增五个随机种子的`baseline_mappo` validation数据上进行了配对干预。测量通信开销开关为`true`：每次有效非空测量动作对应一个512字节等效队列负载；不重新训练MAPPO，不读取test，不修改EKF、GAT、信道、奖励或动作中的带宽和速度分量。
+
+比较处理为：`recorded_mappo`、`unconstrained_information_gain`和`budgeted_information_gain`。代理尺度与测量预算仅由各随机种子的train数据确定，validation用于配对评价；五个base seed是统计独立单位，时间窗口和EKF事件不作为独立样本。
+
+结果目录为：
+
+```text
+data/synthetic/python_sim_information_gain_budget_replication_overhead_seedset_7071_11127/
+logs/preliminary/python_sim_information_gain_budget_replication_overhead_seedset_7071_11127/
+plots/preliminary/python_sim_information_gain_budget_replication_overhead_seedset_7071_11127/
+```
+
+结构验收通过：`audit_ok=true`、`overall_ok=true`；15个处理目录全部为`episode-v1.3`，每个包含20个validation episode且逐目录验证通过；`recorded_mappo`精确复现参考validation结果；真实轨迹、障碍物轨迹、速度增量和带宽动作在处理间保持不变；test数据未读取；代理选择不使用真值、LOS/NLOS真值或未来通信结果。测量开销日志共记录`28,954`条事件，非空测量与512字节负载逐项对应，队列和通信字段均有限。
+
+主要validation结果（处理减`recorded_mappo`，以5个base seed为单位）为：
+
+| 处理 | 位置RMSE变化 | (J_{\mathrm{loc}})变化 | (J_{\mathrm{com}})变化 | 95% Bootstrap区间 |
+|---|---:|---:|---:|---|
+| `unconstrained_information_gain` | `-0.01960 m` | 近似为0 | `+0.01285` | RMSE `[-0.02551,-0.01333]`；(J_{\mathrm{com}}) `[0.00351,0.02180]` |
+| `budgeted_information_gain` | `-0.01056 m` | 近似为0 | `+0.00356` | RMSE `[-0.01518,-0.00514]`；(J_{\mathrm{com}}) `[-0.00544,0.01198]` |
+
+因此本轮的结构性结论为：无预算信息增益处理在validation中降低了定位RMSE，同时显著增加了通信代价，`decision_supported=true`且决策为`localization_gain_communication_cost_tradeoff_exposed`，说明通信—定位权衡已被真实暴露。预算处理也降低了RMSE，但其(J_{\mathrm{com}})区间跨越0，尚不能宣称预算方案已经稳定优于参考策略；审计中的`budgeted_effective=false`应予保留。
+
+本轮只建立机制证据，不证明MAPPO最终策略优越性，也不覆盖碰撞、能耗和5/7架无人机扩展问题。后续应冻结当前信息增益代理和实验结果，先决定是否将预算受控测量机制作为独立方法分支进行正式训练；在此之前不调节惩罚系数、不修改EKF或奖励公式。
+
+## 预算约束下的 MAPPO 联合优化实现（2026-08-26）
+
+为把已经暴露的“定位收益—通信开销”权衡交给策略学习，代码新增了兼容旧分支的`budgeted_quality_aware_mappo`。该分支的固定测量预算只由同一随机种子的`baseline_mappo/train`动作日志计算，每架无人机的预算为训练episode非`none`测量次数均值取整；validation和test只复用该预算，不重新拟合。每次`reset`清零已用预算，预算耗尽时动作掩码只保留`none`，合法非空测量每次消耗一个单位，并写入`measurement_budget.csv`。剩余预算比例只进入预算分支的测量动作头，不进入带宽、速度或centralized critic。
+
+本次实现涉及：
+
+```text
+src/simulation/environment.py
+src/learning/mappo.py
+src/experiments/formal.py
+src/experiments/quality_aware_mappo.py
+src/experiments/pilot.py
+tests/test_measurement_budget.py
+```
+
+系统模型和方法文档已同步补充固定预算、剩余预算、预算动作掩码、训练集拟合和日志规则；符号表登记了`$K^{\mathrm{meas}}_{\nu,i}$`、`$B^{\mathrm{rem}}_{\nu,i,t}$`和`$M^{\mathrm{baseline}}_{\nu,i,e}$`。旧的`baseline_mappo`和`quality_aware_mappo`默认不启用预算约束，历史结果不覆盖。
+
+先运行单种子Smoke，不直接启动五种子长实验：
+
+```text
+run-quality-aware-mappo --output data/synthetic/python_sim_budgeted_quality_aware_mappo_smoke --logs-output logs/preliminary/python_sim_budgeted_quality_aware_mappo_smoke --plots-output plots/preliminary/python_sim_budgeted_quality_aware_mappo_smoke --seeds 2026 --steps 50 --warmup-episodes 2 --train-episodes 5 --validation-episodes 5 --test-episodes 5 --scenario-profile data/synthetic/scenario_screening_seed2026/selected_profiles/moderate.json --ekf-config data/synthetic/python_sim_calibration_seed2026_v4/selected_ekf_config.json --measurement-overhead-enabled --quality-logit-penalty 1.0 --bootstrap-samples 100 --device cpu --force
+```
+
+Smoke只验收三分支（baseline、原quality-aware、预算quality-aware）的接口、预算上限、动作掩码、队列日志、loss、协方差和episode-v1.3；通过后才使用`7071、8080、9099、10118、11127`进行正式五种子训练。正式判定仍以seed为独立样本：预算分支必须在不超预算的前提下改善RMSE，且通信代价不显著恶化；否则只能报告定位—通信权衡，不能宣称全面优于baseline。
+
+## 无效测量动作修正后的五种子验收（2026-08-27）
+
+本轮针对“非潜在边被当作有效测量动作”的接口问题进行了修正。测量动作掩码现在只开放当前决策时刻的潜在出边，`none`始终保留；环境对异常非空动作进行防御性归一化，不产生测量通信负载，也不进入EKF。合法非空测量统一记录为一个512字节等效数据包。动作日志新增`invalid_measurement_action`和`measurement_transition_invalidated`两个区分字段：前者表示策略提交的动作在决策时无效，后者表示动作提交后由于运动导致链路离开潜在边，二者不混为一谈。
+
+修正后的五种子、三分支实验使用3架无人机、Moderate场景、20个warm-up、100个train、20个validation和20个test回合，结果保存于：
+
+```text
+data/synthetic/python_sim_budgeted_quality_aware_mappo_action_mask_fix_20260826/
+logs/preliminary/python_sim_budgeted_quality_aware_mappo_action_mask_fix_20260826/
+plots/preliminary/python_sim_budgeted_quality_aware_mappo_action_mask_fix_20260826/
+```
+
+结构验收全部通过：15个`scale_3`分支均生成完成，均为`episode-v1.3`，每个分支包含100个train、20个validation和20个test episode，逐目录验证通过；Anaconda Python全量测试为`130 passed`，符号审计通过。独立字段审计发现预动作无效测量动作和掩码违规均为`0`，143645条测量开销记录全部满足潜在边、512字节、请求1包和实际加载1包，99684条预算记录无超预算或负余额。另记录645条运动后拓扑过渡失效事件；这些事件已转换为实际`none`，不属于策略提交的无效动作。
+
+正式算法判定仍为`decision_supported=false`。以budgeted分支相对baseline的validation结果为准，位置RMSE五种子平均差异为`+0.00359 m`（95% Bootstrap区间`[-0.00939, 0.01775]`），有害更新比例平均差异为`+0.07476`（区间`[-0.10917, 0.27236]`）；两项均只有2/5个种子改善且区间跨越0。`J_com`平均增加`+0.01289`，团队奖励平均下降`-0.02459`，因此当前结论是：无效动作接口问题已修正，环境—动作—队列链路结构正确，但质量感知MAPPO尚未证明稳定优于baseline。旧实验目录未覆盖，暂不扩展到5/7架无人机或新的碰撞场景。
+
+## 最新五种子三分支动作—通信开销机制审计
+
+本阶段新增`--branches`参数，默认仍审计历史的`baseline_mappo`和`quality_aware_mappo`两分支；需要时可显式加入`budgeted_quality_aware_mappo`。审计为只读、validation-only，不重新训练、不修改EKF、奖励、GAT、信道、碰撞模型或既有episode与checkpoint。它分别记录决策前潜在边、运动后潜在边、提交时无效动作、运动导致的拓扑过渡失效、最终有效测量、512字节队列负载、通信KPI、`J_com`和协同EKF更新，避免把两类无效性混为一谈。
+
+本轮针对动作掩码修正后的最新五种子结果使用：
+
+```text
+run-policy-mechanism-audit --reference data/synthetic/python_sim_budgeted_quality_aware_mappo_action_mask_fix_20260826 --output logs/preliminary/python_sim_budgeted_quality_aware_mappo_action_mask_fix_20260826/policy_mechanism_audit_v2 --plots-output plots/preliminary/python_sim_budgeted_quality_aware_mappo_action_mask_fix_20260826/policy_mechanism_audit_v2 --branches baseline_mappo quality_aware_mappo budgeted_quality_aware_mappo --seeds 7071 8080 9099 10118 11127 --split validation --bootstrap-samples 10000 --bootstrap-seed 2026 --device cpu --force
+```
+
+输出为：
+
+```text
+logs/preliminary/python_sim_budgeted_quality_aware_mappo_action_mask_fix_20260826/policy_mechanism_audit_v2/
+plots/preliminary/python_sim_budgeted_quality_aware_mappo_action_mask_fix_20260826/policy_mechanism_audit_v2/
+```
+
+其中`measurement_policy_trace.jsonl`只保留执行期可见质量、动作、边状态和队列字段；训练集仅用于确认warm-up质量模型和预算来源，test完全不读取。验收重点是：提交的非空动作均属于决策时潜在边；运动后失效单独统计；最终有效测量与一个512字节等效数据包一一对应；budgeted分支不超预算；三分支动作、队列重放和所有字段均可复现。审计完成前不扩展5/7架无人机、不调整`lambda_q`，不修改EKF、奖励、GAT或信道模型。
+
+## 最新五种子三分支机制审计结果（2026-08-27）
+
+上述审计已在修正后的代码上完成重放，使用`baseline_mappo`、`quality_aware_mappo`和`budgeted_quality_aware_mappo`三个分支，以及`7071、8080、9099、10118、11127`五个随机种子；只读取validation，未读取test，未覆盖原始episode、checkpoint或既有日志。结果位于：
+
+```text
+logs/preliminary/python_sim_budgeted_quality_aware_mappo_action_mask_fix_20260826/policy_mechanism_audit_v2/
+plots/preliminary/python_sim_budgeted_quality_aware_mappo_action_mask_fix_20260826/policy_mechanism_audit_v2/
+```
+
+结构验收为`audit_ok=true`：提交时无效非空动作数量为`0`，动作和队列事件重放无差异，512字节负载规则及事件数量对应关系通过，预算分支无超预算记录，质量模型来源均为warm-up。15个`scale_3`分支目录均通过`episode-v1.3`验证；全量测试为`133 passed`；符号审计为`ok=true`。
+
+机制报告给出的决策为`post_motion_transition_invalidation`、`decision_supported=false`。这不是提交动作掩码错误：它表示少量合法动作在执行运动后离开了潜在通信边，需要与提交时无效动作分开解释。全局最高分支内比例为`0.2`，出现在seed=`9099`的budgeted分支，分母仅为5次提交动作（1次运动后失效），不能据此直接认定普遍存在严重时序问题。quality-aware和budgeted分支的质量特征—测量概率响应均为`responsive`，但本审计不证明定位性能或算法优越性。
+
+当前后续方向应先针对运动后拓扑过渡失效检查动作生效时序与边界条件；在该机制问题解释清楚前，不扩展到5/7架无人机，不调整`lambda_q`，也不修改EKF、奖励、GAT或信道模型。
+
+## 运动后拓扑失效审计口径校准（2026-08-27）
+
+针对 v2 审计把单个小分母单元的比例误认为全局时序问题，本轮只校准审计口径，不改变环境物理执行逻辑。`measurement_transition_invalidated` 的固定含义为：动作提交时属于潜在出边，但无人机完成本决策窗口运动后，该边离开通信范围；它与提交时的`invalid_measurement_action`严格区分。
+
+v3 只读取已有三分支、五随机种子的 validation 数据，输出到：
+
+```text
+logs/preliminary/python_sim_budgeted_quality_aware_mappo_action_mask_fix_20260826/policy_mechanism_audit_v3/
+plots/preliminary/python_sim_budgeted_quality_aware_mappo_action_mask_fix_20260826/policy_mechanism_audit_v3/
+```
+
+新的判定规则为：运动后失效统计分母是提交的非空测量动作；分母小于`30`的单元只报告原始计数，不触发时序问题判定；只有汇总失效率严格超过`5%`且分母不少于`30`时，才标记为可行动时序问题。报告同时保存 seed×分支、分支、seed 和全局四级汇总。
+
+v3 结果为：全局运动后失效`69/12835=0.5376%`，全局状态为`low_rate_expected_link_breakage`；提交时无效动作数仍为`0`。分支级比例分别为 baseline=`48/6132=0.7828%`、quality-aware=`12/3981=0.3014%`、budgeted=`9/2722=0.3306%`。`seed=9099`的 budgeted 单元为`1/5=20%`，已标记为`small_denominator=1`，不会触发全局时序告警。
+
+v3 的`audit_ok=true`，动作和队列重放、512字节负载对应关系、预算约束、warm-up来源和 validation-only 隔离均通过；未修改`src/simulation/environment.py`、论文文档、episode schema、原始 episode 或 checkpoint。该结果支持冻结当前“动作选择→运动更新→信道计算”的物理语义，下一步回到通信开销约束下的 MAPPO 性能验收。
+
+## 通信开销约束下的 MAPPO 最终验收（2026-08-27）
+
+本轮使用已有的3架无人机、Moderate场景、`7071、8080、9099、10118、11127`五个随机种子结果完成最终验收，不重新训练，不读取test进行方案选择，也不修改EKF、GAT、信道、奖励、`lambda_q`或动作时序。主要比较为`budgeted_quality_aware_mappo`与`baseline_mappo`，`quality_aware_mappo`仅作辅助参考。
+
+结构检查全部通过：15个分支均通过`episode-v1.3`验证；`audit_ok=true`；预算分支无超预算记录；提交时无效测量动作为0；合法测量与512字节等效负载的对应关系通过；质量模型仅来自warm-up；动作和队列事件可以精确重放；test数据未用于选择或调参。运动后拓扑失效为`69/12835=0.5376%`，低于5%的可行动阈值，状态为`low_rate_expected_link_breakage`，不判定为动作时序错误。
+
+以随机种子为独立统计单位，预算质量感知分支相对baseline的validation结果为：位置RMSE平均变化`+0.00359 m`，仅2/5个种子改善，95%区间为`[-0.00939, 0.01775]`；有害更新比例平均变化`+0.07476`，仅2/5个种子下降，95%区间为`[-0.10917, 0.27236]`；`J_com`平均增加`+0.01289`，团队奖励平均下降`-0.02459`，相关区间均跨越0。因此`decision_supported=false`。
+
+最终研究结论为：环境已经真实暴露了“协同定位收益—测量通信开销”的联合优化问题，环境—动作—队列—通信指标链路也已验证；但当前质量感知MAPPO在五个种子下尚未稳定解决该问题，不能宣称算法优于baseline。当前结果应冻结为3架无人机机制和算法验收证据，暂不扩展到5/7架无人机，不新增碰撞场景，不继续调大风险惩罚系数。后续若继续改进，只能以本结果为基线，针对跨种子测量决策稳定性设计一个单独、可预注册的最小策略改动。
+
+## 安全风险场景筛选（2026-08-27）
+
+为验证安全与能耗问题是否在环境中真实存在，本项目新增独立的安全风险场景筛选模块。该模块固定3架无人机、GNSS denied、Moderate通信配置和已选EKF配置，不重新训练MAPPO，也不修改EKF、GAT、信道、奖励或核心定位目标。场景采用安全初始位置、同一飞行高度的动态球形障碍物穿越无人机走廊，以及不使用邻居信息的独立目标跟踪控制器；场景种子是统计独立单位，时间窗口只作机制诊断。
+
+运行入口为：
+
+```text
+run-safety-risk-screening --output data/synthetic/safety_risk_screening_seed2026 --logs-output logs/preliminary/safety_risk_screening_seed2026 --plots-output plots/preliminary/safety_risk_screening_seed2026 --scenario-seeds 2026 3035 4044 5053 6062 7071 8080 9089 10098 11107 --steps 50 --force
+```
+
+筛选结果保存于：
+
+```text
+data/synthetic/safety_risk_screening_seed2026/
+logs/preliminary/safety_risk_screening_seed2026/
+plots/preliminary/safety_risk_screening_seed2026/
+```
+
+本轮结构审计和预设场景门槛均通过：10个场景种子中初始碰撞为0，投影开启下实际碰撞回合比例为20%，最小安全距离分布包含低于2 m安全阈值的风险场景，状态、协方差和能耗均有限。日志同时区分投影前风险与投影后实际碰撞，并保留投影关闭的诊断重放；这组结果只证明场景适合进行安全—能耗算法比较，不代表MAPPO已经改善安全性能。
+
+随后在完全相同且已冻结的安全风险场景种子上，配对运行`baseline_mappo`和完整MAPPO，比较碰撞率、最小安全距离、安全投影、能耗和轨迹长度；场景生成规则未根据算法结果反向调整。
+
+## 安全风险场景上的 MAPPO 配对安全—能耗评估（2026-08-27）
+
+在冻结的安全风险场景上完成了不重新训练的确定性配对评估。评估固定3架无人机、GNSS denied、projection on，使用5个策略种子`7071、8080、9099、10118、11127`；每个策略种子在10个场景种子上推理，统计时先在同一场景内平均5个策略种子，再以10个场景种子作为独立统计单位。未调用`trainer.update()`，未读取test数据。
+
+评估入口为：
+
+```text
+run-safety-mappo-evaluation --output data/synthetic/safety_mappo_evaluation_seed2026 --model-root data/synthetic/python_sim_budgeted_quality_aware_mappo_action_mask_fix_20260826 --scenario-root data/synthetic/safety_risk_screening_seed2026/scenarios --logs-output logs/preliminary/safety_mappo_evaluation_seed2026 --plots-output plots/preliminary/safety_mappo_evaluation_seed2026 --policy-seeds 7071 8080 9099 10118 11127 --scenario-seeds 2026 3035 4044 5053 6062 7071 8080 9089 10098 11107 --branches baseline_mappo budgeted_quality_aware_mappo --steps 50 --bootstrap-samples 10000 --bootstrap-seed 2026 --device cpu --force
+```
+
+结果位于：
+
+```text
+data/synthetic/safety_mappo_evaluation_seed2026/
+logs/preliminary/safety_mappo_evaluation_seed2026/
+plots/preliminary/safety_mappo_evaluation_seed2026/safety_energy_comparison.png
+```
+
+结构验收全部通过：100个episode行、4895个时间步行，`audit_ok=true`；两个分支均正确加载冻结检查点，所有源分支通过`episode-v1.3`验证，预算和状态有限性检查通过，碰撞后回合正确终止且不标记为任务完成。运动后拓扑失效为`69/12835=0.5376%`，属于低比例正常链路断开，不构成动作时序错误。
+
+安全结果显示：baseline实际碰撞为`0/50`，`budgeted_quality_aware_mappo`实际碰撞为`4/50=8%`，对应3个场景种子出现碰撞；碰撞率差异（完整MAPPO减baseline）的场景级Bootstrap 95%区间为`[0, 0.16]`，方向是完整MAPPO更差而不是改善。最小安全距离差异为`-0.1099 m`，其区间`[-0.4928, 0.2427]`跨越0，不能证明安全距离改善。
+
+完整MAPPO的能耗代理平均低`0.0315`、轨迹长度平均短`10.57 m`，但其4个碰撞回合提前终止，因此这两个下降值存在回合长度混杂，不能作为能耗优化或安全改善证据。完整MAPPO位置RMSE略低同样受到提前终止影响。最终报告的判定为`full_mappo_collision_rate_worse`，`decision_supported=false`。
+
+本轮结论是：安全风险场景确实暴露了安全问题，但当前冻结的完整MAPPO检查点没有优于baseline的安全性能，不能宣称算法已经解决安全—能耗问题。下一步应先分析碰撞回合的动作轨迹、障碍物局部观测、投影前风险和投影触发位置，再决定是否设计安全约束训练或增加已预注册的安全场景重复验证；暂不修改奖励权重，也不把提前终止造成的低能耗解释为优化成功。
+
+## 安全碰撞回合的观测—动作—投影归因审计（2026-08-27）
+
+在冻结的安全场景和检查点上完成了只读机制审计。审计使用`baseline_mappo`和`budgeted_quality_aware_mappo`两个分支、5个策略种子和10个场景种子；每个场景内先平均策略种子，场景种子作为独立统计单位。推理使用CPU确定性模式，不调用`trainer.update()`，不读取test，也不修改环境、EKF、GAT、信道、奖励或碰撞逻辑。
+
+结果保存于：
+
+```text
+logs/preliminary/safety_mappo_evaluation_seed2026/safety_mechanism_audit/
+plots/preliminary/safety_mappo_evaluation_seed2026/safety_mechanism_audit/
+```
+
+结构验收为`audit_ok=true`：100个策略—场景—分支episode组合和14,685条时间步记录完整，新增的逐组合覆盖检查通过；提交时无效动作数为0，actor观测不含真值，名义动作—实际动作及投影差值闭合，碰撞回合均立即终止且不标记任务完成，所有状态、协方差和诊断量有限。冻结源目录未被覆盖。
+
+审计发现4个碰撞回合，均为动态障碍物移动后才在实际位置上形成碰撞：运动后、障碍物更新前的实际碰撞标记为0，随后动态障碍物更新并触发环境碰撞检查；碰撞事件均包含该时序对照字段。只有1个碰撞回合在运动前的名义危险判定中被标记，只有1个碰撞回合发生安全投影；因此不能把其余碰撞简单归因于“actor忽略了障碍物”或“投影普遍失效”。
+
+该审计支持的结论是：actor确实获得了局部障碍物特征，但当前完整MAPPO在动态障碍物更新时序下仍存在安全归因风险；碰撞回合提前终止造成的较低能耗、轨迹长度和位置RMSE不能解释为优化成功。下一步应根据该审计结果单独处理安全执行时序或补充预注册安全场景验证，暂不调整奖励权重、重新训练MAPPO或扩展到5/7架无人机。
+
+## 安全碰撞时序反事实审计（2026-08-27）
+
+为区分“策略危险动作”和“动态障碍物更新后形成碰撞”，本项目新增只读入口`run-safety-timing-counterfactual-audit`。审计使用冻结的3架无人机、5个策略种子和10个安全场景种子，在CPU确定性推理下重放`baseline_mappo`和`budgeted_quality_aware_mappo`；不调用`trainer.update()`，不读取test，也不修改环境实际执行顺序、EKF、GAT、信道、奖励或碰撞模型。
+
+实际语义保持为：
+
+```text
+运动与当前障碍物投影 → 动态障碍物更新 → 碰撞检查
+```
+
+同时对每个决策窗口执行不回写的一步反事实：先按照当前障碍物的速度、边界反弹和时间步预测下一位置，再使用相同名义动作和相同安全投影规则进行离线几何检查。反事实结果不进入后续状态，不消耗随机数；障碍物几何仅用于该离线诊断。
+
+结果保存于：
+
+```text
+logs/preliminary/safety_mappo_evaluation_seed2026/safety_timing_counterfactual/
+plots/preliminary/safety_mappo_evaluation_seed2026/safety_timing_counterfactual/
+```
+
+结构验收为`audit_ok=true`：100个策略—场景—分支回合、14,685条时间步记录和4个碰撞事件完整；场景哈希、动作—运动闭合、障碍物预测闭合、碰撞终止、任务完成标记、有限性、状态不变性和源目录保护检查均通过；当前重放与既有安全机制审计的100个组合签名一致。
+
+4个当前碰撞回合均满足“运动与障碍物更新前未碰撞、动态障碍物移动后形成碰撞”的时序特征，但使用预测障碍物提前投影的一步反事实仍有4个碰撞，未避免任何当前碰撞。因此当前结论为`dynamic_timing_present_but_shadow_not_sufficient`：动态障碍物更新时序确实是碰撞归因的一部分，但不是仅靠单步提前投影即可消除的唯一原因，还需要进一步检查观测范围、执行时序和安全约束设计。该审计不是新的性能比较，不能把提前终止造成的能耗、轨迹长度或RMSE差异解释为算法优势。
+
+主要报告和图：
+
+```text
+logs/preliminary/safety_mappo_evaluation_seed2026/safety_timing_counterfactual/timing_audit_report.json
+plots/preliminary/safety_mappo_evaluation_seed2026/safety_timing_counterfactual/safety_timing_counterfactual.png
+```
+
+## 动态障碍物可观测性与安全包络审计（2026-08-27）
+
+在上述冻结时序重放基础上，新增了只读的`run-safety-observability-audit`。该审计使用5个策略种子、10个安全场景种子和`baseline_mappo`、`budgeted_quality_aware_mappo`两个分支，直接复用validation timing replay；不读取test、不调用训练更新、不改变环境实际状态，也不覆盖已有安全评估和时序审计结果。
+
+审计结果为`audit_ok=true`，处理4895个决策窗口并复现全部4个动态车辆碰撞事件。当前actor的障碍物输入是有限的四维聚合特征：当前最小障碍物距离、box数量、sphere数量和时间步；该特征不包含动态障碍物速度、相对接近趋势、TTC或具体障碍物ID。因此碰撞障碍物虽然在聚合距离特征中可间接反映，但无法被actor按对象识别，4个碰撞事件的主诊断分类均为`observable_but_no_motion_feature`。
+
+安全包络诊断显示，当前投影不是动态障碍物扫掠包络检查；对障碍物进行1、2、3步离线预测后，4个碰撞事件仍均存在动态碰撞风险，说明“只提前一步预测”不能单独解释或消除碰撞。该结果支持先补充执行期可见的动态障碍物运动/接近信息，再做3架无人机、seed=2026的单种子Smoke；在Smoke通过前不重新进行五种子训练，不调整奖励、EKF、GAT、信道或碰撞物理逻辑。
+
+审计输出：
+
+```text
+logs/preliminary/safety_mappo_evaluation_seed2026/safety_observability_audit/
+plots/preliminary/safety_mappo_evaluation_seed2026/safety_observability_audit/safety_observability_audit.png
+```
+
+## 动态障碍物运动趋势观测与单种子 Smoke（2026-08-28）
+
+针对安全可观测性审计发现的“actor 只有四维静态障碍物聚合、缺少动态运动趋势”问题，代码已增加一个默认关闭的动态障碍物运动观测开关。开启后，局部障碍物特征在原有四维之后追加当前动态最小间隙、最大非负接近速率、下一决策窗口预测间隙和运动观测有效性标记；节点输入由历史 37 维扩展为 41 维。新增量只以局部聚合标量进入 actor/GAT，不传递障碍物绝对坐标、对象 ID、真实误差、碰撞标签或未来真值；一步预测也不改变现有“运动—当前投影—动态障碍物更新—碰撞检查”的物理执行时序。
+
+历史实验和 37 维检查点保持兼容，只有显式安全 Smoke 使用 41 维并从头训练。运行入口为：
+
+```text
+run-safety-motion-feature-smoke --scenario data/synthetic/safety_risk_screening_seed2026/scenarios/scenario_2026.json --output data/synthetic/safety_motion_feature_smoke_seed2026 --logs-output logs/preliminary/safety_motion_feature_smoke_seed2026 --plots-output plots/preliminary/safety_motion_feature_smoke_seed2026 --uav-count 3 --seed 2026 --steps 50 --warmup-episodes 2 --train-episodes 5 --validation-episodes 5 --test-episodes 5 --measurement-overhead-enabled --quality-logit-penalty 1.0 --device cpu --force
+```
+
+该 Smoke 仅验证新观测接口、41 维图输入、测量开销/预算闭环、有限性和 `episode-v1.3` 契约，不构成安全性能改善结论。输出写入独立的 `data/synthetic/safety_motion_feature_smoke_seed2026/`、`logs/preliminary/safety_motion_feature_smoke_seed2026/` 和 `plots/preliminary/safety_motion_feature_smoke_seed2026/` 目录；Smoke 通过后，才可在冻结的新检查点上重新进行十个安全场景的配对评估。
+
+## 41维动态障碍物观测的十场景冻结评估（2026-08-28）
+
+Smoke 完成后新增只读入口 run-safety-motion-feature-evaluation，使用 seed=2026 的两个 41 维冻结检查点，在相同的十个安全场景中进行确定性配对重放。该入口支持 Smoke 的直接目录布局 branch/scale_3，不调用 trainer.update()，不读取 test，也不改变实际环境时序。
+
+结果保存于：
+
+    data/synthetic/safety_motion_feature_evaluation_seed2026/
+    logs/preliminary/safety_motion_feature_evaluation_seed2026/
+    plots/preliminary/safety_motion_feature_evaluation_seed2026/
+
+结构审计为 audit_ok=true，两个分支均使用 41 维节点输入，动态运动特征、状态、协方差和碰撞终止检查通过。单种子诊断中 baseline 在 10 个场景发生 3 次碰撞，budgeted_quality_aware_mappo 发生 1 次碰撞；但完整分支最小安全距离平均下降约 4.33 m，能耗代理平均增加约 0.0497，因此只能记录为“碰撞次数下降但安全裕度和能耗未同步改善”的诊断信号，不能宣称动态特征已经解决安全问题。该结果仍需五个独立策略种子的 41 维正式重训和安全评估确认。
+
+## 41维动态障碍物观测的正式五种子安全验证（已完成，2026-08-28）
+
+为把单种子 Smoke 扩展为可解释的正式消融，本项目新增独立安全场景池和三分支训练入口 `run-safety-motion-feature-formal-training`。场景池固定分为 train（12026–12045）、validation（13026–13030）和 test（14026–14030），与既有十个安全 hold-out 场景完全不重叠；场景文件、哈希、初始安全状态和分组写入 `manifest.json`。`--force` 只管理本次训练输出，不覆盖已存在的场景池文件。
+
+三分支固定为：`baseline_37d`（37维历史观测）、`baseline_41d`（仅增加四个动态障碍物运动聚合特征）和 `budgeted_quality_aware_41d`（41维观测、执行期质量特征和训练集预算）。三个分支保持 EKF、GAT、信道、队列、奖励、测量开销和动态障碍物物理时序一致；预算只由每个策略种子的 `baseline_37d/train` 测量次数计算，质量模型只在完整分支的 warm-up 中拟合。测试回合只生成并封存，不参与拟合、模型选择或调参。
+
+先用 seed=2026、2/5/5/5 回合完成三分支 Smoke，检查 37/41 维检查点、场景池分配、预算接口、episode-v1.3 和有限性。Smoke 已通过，输出位于：
+
+```text
+data/synthetic/safety_motion_feature_formal_mappo_smoke_seed2026/
+logs/preliminary/safety_motion_feature_formal_mappo_smoke_seed2026/
+plots/preliminary/safety_motion_feature_formal_mappo_smoke_seed2026/
+```
+
+正式训练已完成。15 个分支均包含 100 个 train、20 个 validation 和 20 个 test 回合，并全部通过 `episode-v1.3`；全量测试为 163 passed，`main.py audit-symbols` 通过。正式评估使用既有十个冻结安全 hold-out 场景，评估阶段不调用 `trainer.update()`，不读取正式训练 test。统计先在每个场景内平均五个策略种子，再以场景种子作为独立单位计算 Bootstrap 区间。
+
+正式评估输出位于：
+
+```text
+data/synthetic/safety_motion_feature_formal_mappo_seedset_7071_11127/
+logs/preliminary/safety_motion_feature_formal_evaluation_seed2026/
+plots/preliminary/safety_motion_feature_formal_evaluation_seed2026/
+```
+
+结构审计为 `audit_ok=true`，但 `decision_supported=false`。碰撞回合数为：`baseline_37d=9/50`、`baseline_41d=7/50`、`budgeted_quality_aware_41d=4/50`。完整分支相对 `baseline_41d` 的场景级碰撞率差异为 -0.06，95% Bootstrap 区间为 [-0.12, 0.00]，未满足严格的“区间上界小于 0”；最小安全距离差异为 -0.082 m，区间为 [-0.514, 0.285]；能耗代理差异为 +0.0399，区间为 [0.0248, 0.0537]。因此完整分支虽然描述性地减少了碰撞回合，但安全裕度变差且能耗显著增加，不能宣称已经解决安全问题。
+
+消融结论为：`baseline_41d-baseline_37d` 的动态运动特征使最小安全距离提高约 1.243 m，但能耗代理也增加约 0.0466；在相同 41 维观测下，质量感知与预算分支尚未证明优于 `baseline_41d`。该结果确认安全风险真实存在，并定位到“动态观测有效性与质量/预算策略仍需改进”的研究问题；碰撞提前终止造成的能耗、轨迹长度和 RMSE 只作为删失描述，不能直接解释为算法优势。当前不扩展无人机规模，也不修改 EKF、奖励、GAT、信道或碰撞物理模型。
+
+## 41维安全机制归因审计、动态扫掠投影最小修正与重新验收（已完成，2026-08-28）
+
+针对上述三分支正式安全结果，新增只读入口 `run-safety-motion-feature-formal-mechanism-audit`，使用5个策略种子、10个冻结安全场景和 `baseline_37d`、`baseline_41d`、`budgeted_quality_aware_41d` 三个分支。审计阶段不调用 `trainer.update()`，不读取正式训练 `test`，以场景种子为独立统计单位，并记录41维动态观测、名义/投影/实际动作、投影原因、碰撞时刻、测量预算和512字节通信负载等诊断字段。
+
+审计结构验收通过：`audit_ok=true`；150个回合、30个场景—分支汇总完整；提交时无效测量动作为0；37/41维输入和动态特征到达actor；动作—运动闭合、预算约束、有限性、场景哈希、warm-up质量模型来源和碰撞终止语义均通过。归因主因按预注册顺序判定为 `projection_coverage_insufficient`：动态特征已经进入actor，碰撞前没有稳定的名义危险动作证据，但动态障碍物更新后仍会使实际位置进入风险区域，原有投影未覆盖该运动过程。
+
+随后只实施一个默认关闭的最小修正 `dynamic_obstacle_swept_projection_enabled`：在安全投影中加入动态障碍物一步扫掠包络检查；不改变EKF、奖励、GAT、信道、队列、碰撞模型和历史37维检查点。修正后的三分支Smoke通过，五种子正式重训和十场景冻结评估也通过结构验收。
+
+修正后的正式评估仍不支持算法安全改善：碰撞回合为 `baseline_37d=13/50`、`baseline_41d=12/50`、`budgeted_quality_aware_41d=10/50`；完整分支相对 `baseline_41d` 的碰撞率差异为 `-0.04`，场景级Bootstrap 95%区间 `[-0.10, 0.00]`，严格判定仍未通过；最小安全距离差异为 `-0.259 m`，区间 `[-0.812, 0.271]`；能耗差异为 `+0.0583`，区间 `[0.0464, 0.0708]`。重新执行的机制审计仍给出 `projection_coverage_insufficient`，但动态特征、动作掩码、预算和数据隔离检查全部通过。因此当前严谨结论是：安全问题已被真实暴露，最小扫掠投影修正已完成并验证，但仍未证明完整MAPPO解决安全—能耗问题；不把碰撞减少或提前终止造成的指标差异写成算法成功。
+
+本阶段报告和图位于：
+
+```text
+logs/preliminary/safety_motion_feature_formal_swept_projection_mechanism_audit_seed2026/audit_report.json
+plots/preliminary/safety_motion_feature_formal_swept_projection_mechanism_audit_seed2026/safety_motion_feature_formal_mechanism_audit.png
+logs/preliminary/safety_motion_feature_formal_swept_projection_evaluation_seed2026/audit_report.json
+```
+
+当前应冻结这组结果，暂不扩展到5/7架无人机，也不继续修改核心模型。若继续推进，应把“动态障碍物更新后仍可能穿入当前安全位置”的剩余问题单独预注册为下一轮安全执行/包络实验，不能把它与质量策略、奖励或EKF同时修改。
+
+## 当前最终环境下的最弱独立基线复核（已完成，2026-08-28）
+
+为再次验证导师要求的“问题必须真实存在”，在启用 `dynamic_obstacle_swept_projection_enabled` 的当前最终环境中，使用不读取邻居信息、不进行MAPPO更新的 `independent_fixed` 控制器，重放10个冻结安全场景。`projection_on` 与 `projection_off` 均保留在诊断输出中，正式筛选只采用 `projection_on`；统计独立单位为场景种子，结果写入新目录，未覆盖既有安全筛选和MAPPO评估。
+
+复核通过：10个场景初始碰撞数为0，全部20个（开启/关闭投影各一组）场景状态有限；开启扫掠投影的独立基线发生 `1/10=10%` 碰撞，预投影风险为 `2/10=20%`，`screening_passed=true`。因此当前最终环境仍产生非零且不饱和的安全风险，问题不是由初始非法状态或MAPPO训练过程人为制造的。该基线只证明安全优化对象存在，不证明任何MAPPO分支有效。
+
+复核结果位于：
+
+```text
+data/synthetic/safety_risk_screening_swept_projection_seed2026/
+logs/preliminary/safety_risk_screening_swept_projection_seed2026/
+plots/preliminary/safety_risk_screening_swept_projection_seed2026/safety_risk_screening.png
+```
+
+结合当前正式结果，三层证据链为：`independent_fixed` 证明安全问题存在，`baseline_41d` 提供动态观测控制，`budgeted_quality_aware_41d` 检验完整方法。当前完整分支仍未通过安全改善判定，不能将“问题已暴露”表述为“问题已解决”。
+
+## 测量策略跨种子稳定性审计（已完成，2026-08-28）
+
+针对最新 `baseline_mappo`、`quality_aware_mappo` 和 `budgeted_quality_aware_mappo` 五种子结果，新增只读入口 `run-measurement-policy-stability-audit`。审计将训练期 `training_metrics.jsonl` 与既有 validation-only `policy_mechanism_audit_v3` 汇总对齐，不重新训练、不读取 test、不修改 episode、checkpoint 或核心模型。
+
+本次审计输出位于：
+
+```text
+logs/preliminary/python_sim_budgeted_quality_aware_mappo_action_mask_fix_20260826/measurement_policy_stability_audit/
+plots/preliminary/python_sim_budgeted_quality_aware_mappo_action_mask_fix_20260826/measurement_policy_stability_audit/
+```
+
+结构审计为 `audit_ok=true`，但机制结论不是算法有效性通过。三个分支的验证期测量选择率均表现出明显跨种子差异：baseline 范围为 `0.0000--0.9457`，quality-aware 范围为 `0.0014--0.5413`，budgeted 范围为 `0.0017--0.4347`。例如 seed `8080` 的 budgeted 分支有效测量约 `1284` 次，而 seed `9099` 仅约 `4` 次；相应的 `J_com`、团队奖励和定位结果也随测量行为改变。训练日志中的 loss、熵、梯度和裁剪指标均为有限值；动作饱和被记录为诊断信号，但不直接解释为训练崩溃。
+
+当前唯一结论为 `stabilize_measurement_policy_before_core_model_changes`：质量特征已进入 actor、队列开销链路已闭合，但测量策略仍存在显著的训练/跨种子行为不稳定，暂不能宣称质量感知 MAPPO 已稳定解决通信—定位联合优化问题。下一步应冻结核心物理与目标模型，先针对测量动作率和训练稳定性做一个变量的诊断或受控修正，再决定是否重新训练；暂不扩展无人机规模或继续加入动态障碍物变量。
+
+## 训练期测量率约束分支 Smoke（已完成，2026-08-28）
+
+为针对上述“测量策略跨种子波动过大”问题进行单变量稳定性验证，新增独立入口 `run-rate-controlled-quality-mappo` 和分支 `rate_controlled_quality_aware_mappo`。该分支保留质量特征、固定测量预算、测量通信开销、EKF、GAT、信道、奖励和动作头惩罚，仅在 PPO 训练更新中加入基于 baseline `train` 的期望非空测量率约束；baseline 与旧 budgeted 分支默认关闭该约束。
+
+目标测量率严格由每个 seed 的 `baseline_mappo/train/actions.csv` 按实际决策窗口计算，validation 和 test 不参与目标拟合。约束系数固定为 `0.5`、容差固定为 `0.05`，并写入 checkpoint 配置和训练日志。该实现同时保存 `measurement_rate_targets.csv`、`training_rate_constraint.csv`、`validation_policy_metrics.csv`、`seed_comparison.csv`、`paired_contrasts.csv` 和 `audit_report.json`。
+
+已完成 seed=2026 的 3 UAV Smoke（2/5/5/5 回合、50 steps、Moderate、GNSS denied、测量通信开销开启），输出位于：
+
+```text
+data/synthetic/measurement_rate_controlled_mappo_smoke_seed2026/
+logs/preliminary/measurement_rate_controlled_mappo_smoke_seed2026/
+plots/preliminary/measurement_rate_controlled_mappo_smoke_seed2026/
+```
+
+三个分支的 15 个 episode 均通过 `episode-v1.3`；约束损失、状态、协方差、NIS、NEES 和预算记录有限且无超预算。Smoke 只有一个随机种子、训练回合数很少，`stability_supported=false` 和 `decision_supported=false` 是预期结果，不能据此宣称新分支有效。下一步才是使用冻结的系数和同一配置完成五个正式随机种子验证。
+
+## 训练期测量率约束五随机种子正式验证（已完成，2026-08-28）
+
+在保持 `measurement_rate_constraint_coef=0.5`、`measurement_rate_tolerance=0.05`、测量通信开销和质量动作头惩罚不变的条件下，完成了 `7071、8080、9099、10118、11127` 五个随机种子、三个分支（`baseline_mappo`、`budgeted_quality_aware_mappo`、`rate_controlled_quality_aware_mappo`）的正式运行。每个分支均包含 `warm-up=20、train=100、validation=20、test=20`；15 个分支的内部 `episode-v1.3` 验证均通过，状态、协方差、NIS、NEES、loss 和测量率记录有限，预算超限为 0。
+
+测量率目标严格来自各随机种子的 `baseline_mappo/train`，质量模型来自 warm-up；报告确认 test 已生成并封存，未用于目标拟合、模型选择或方案判断。正式输出位于：
+
+```text
+data/synthetic/measurement_rate_controlled_mappo_seedset_7071_11127/
+logs/preliminary/measurement_rate_controlled_mappo_seedset_7071_11127/
+plots/preliminary/measurement_rate_controlled_mappo_seedset_7071_11127/
+```
+
+结构审计为 `audit_ok=true`，但稳定性和算法判定均未通过：rate-controlled 分支的验证测量率跨种子范围为 `0.39879`，标准差为 `0.18015`，虽略优于旧 budgeted 分支的范围 `0.43095` 和标准差 `0.19651`，但只有 `2/5` 个种子落在对应 baseline 训练目标的 `±0.10` 范围内（要求至少 `4/5`）。相对 baseline，rate-controlled 分支的位置 RMSE 仅 `2/5` 个种子改善，平均变化约为 `-0.00183 m`；有害更新比例仅 `1/5` 个种子下降，平均变化约为 `+0.10804`；`J_com` 平均增加约 `+0.03025`，团队奖励平均下降约 `-0.04125`，`J_loc` 平均变化约为 `+0.000005`。因此 `stability_supported=false`、`decision_supported=false`。
+
+该结果说明训练期测量率约束已经正确接入并能稳定运行，但固定约束尚未稳定地控制五个种子的实际策略行为，也没有证明定位或联合优化性能改善。当前应冻结这组结果，下一步只检查目标测量率统计、约束梯度与预算动作掩码之间的关系；不修改 EKF、奖励、GAT、信道模型，不扩展到 5/7 架无人机，也不把 test 结果用于调参。
+
+## 测量率约束机制审计（已完成，2026-08-29）
+
+新增只读入口 `run-measurement-rate-constraint-audit`，对上述五种子结果重新计算 baseline `train` 的每个 seed/UAV 目标率，并使用 `measurement_quality.jsonl` 的 actor-visible 概率诊断 validation 行为；不重新训练、不读取 test、不修改原始 episode 或 checkpoint。输出位于：
+
+```text
+logs/preliminary/measurement_rate_controlled_mappo_seedset_7071_11127/rate_constraint_audit/
+plots/preliminary/measurement_rate_controlled_mappo_seedset_7071_11127/rate_constraint_audit/
+```
+
+审计显示：5 个 seed、3 个 UAV 的 15 个目标率均可从 baseline/train actions 完整复算；rate 分支训练约束日志有 500 条记录，其中 488 条为非零约束损失，训练期期望率也可由 actor 概率日志重建；分支 manifest 中 baseline/budgeted/rate 的约束开关隔离正确，validation 45 个 seed-branch-UAV 单元有限且完整，test 未读取。当前首要门控为 `target_provenance_error`，原因不是目标率公式被证伪，而是既有 `measurement_rate_targets.csv` 缺少 `base_seed`，15 行目标无法由该汇总文件逐 seed 绑定；同时既有 rate 分支的质量日志仍带有旧版分支标记，属于诊断日志追溯缺口。目标重算和约束行为的机制证据保留，但不能把现有结果解释为已证明约束有效。
+
+本轮已在代码中补充 seed 绑定、逐 UAV 目标/期望率/上下界残差/原始与加权损失，以及 rate 分支质量日志的正确标记；这些改动不改变算法公式。既有正式结果未被覆盖。下一步应先用 seed=2026 做最小 Smoke 验证新增追溯字段，再决定是否需要重新完成五种子正式验证；在此之前不盲目增大约束系数、不修改 EKF/奖励/信道，也不扩展动态障碍物或无人机规模。
+
+## 自适应测量率约束五随机种子验证（已完成，2026-08-29）
+
+针对固定测量率约束在五个随机种子上控制能力不足的问题，新增了 `adaptive_budgeted_quality_aware_mappo` 分支。该分支保留质量特征、固定 baseline-train 测量预算、512 字节测量通信开销、EKF、GAT、信道、奖励和动作空间，仅在训练更新后为每架无人机维护独立的自适应测量率乘子：
+
+```text
+dual_initial=0.0
+dual_step_size=0.25
+dual_max=5.0
+measurement_rate_tolerance=0.05
+```
+
+乘子只由 train 更新，validation/test 不更新；test 仅生成并封存。旧的 `baseline_mappo` 和 `budgeted_quality_aware_mappo` 行为保持兼容。新分支的 Smoke 和五随机种子正式运行均完成，输出位于：
+
+```text
+data/synthetic/adaptive_budgeted_quality_aware_mappo_smoke_seed2026/
+logs/preliminary/adaptive_budgeted_quality_aware_mappo_smoke_seed2026/
+plots/preliminary/adaptive_budgeted_quality_aware_mappo_smoke_seed2026/
+
+data/synthetic/adaptive_budgeted_quality_aware_mappo_seedset_7071_11127/
+logs/preliminary/adaptive_budgeted_quality_aware_mappo_seedset_7071_11127/
+plots/preliminary/adaptive_budgeted_quality_aware_mappo_seedset_7071_11127/
+```
+
+结构验收通过：正式实验的 15 个分支均有完整 train/validation/test 数据，每个正式分支的 140 个持久化 episode 均通过 `episode-v1.3`；预算超限为0，乘子状态有限且位于 `[0,5]`，训练目标只来自 baseline `train`，test 未参与选择或调参。正式审计为 `audit_ok=true`，且自适应分支满足目标测量率的 seed 数为 `5/5`，超过预设的 `4/5` 稳定性门槛。
+
+但性能判定仍为 `decision_supported=false`，不能宣称算法已经有效。validation 的五种子均值为：自适应分支位置 RMSE `0.2430 m`、baseline `0.2451 m`；自适应分支有害协同更新比例 `0.3660`、baseline `0.2614`；自适应分支 `J_com=0.0722`、baseline `0.0478`；平均团队奖励分别为 `-0.4480` 和 `-0.4213`。RMSE 配对区间为 `[-0.01615, 0.01416]`，跨越0；有害更新比例差异区间为 `[-0.00782, 0.24709]`，也不支持改善。该结果说明自适应乘子改善了测量率稳定性，但没有同时改善协同更新质量和通信—定位综合性能，且通信代价与有害更新比例上升。
+
+因此当前严谨结论是：测量率约束的目标来源、per-UAV 聚合和梯度路径已经验证正确；自适应机制能够控制测量率，但尚未稳定解决通信—协同定位问题。下一步不应继续调测量率乘子或扩展到5/7架无人机，而应冻结这组结果，转向“质量选择—有效 EKF 更新质量—通信代价”的机制分析；碰撞、安全和动态障碍物支线也不与该问题同时修改。正式审计报告为：
+
+```text
+logs/preliminary/adaptive_budgeted_quality_aware_mappo_seedset_7071_11127/audit_report.json
+```
+
+## 期望测量率—实际动作审计（已完成，2026-08-29）
+
+新增只读入口 `run-measurement-rate-sampling-audit`，用于区分 actor 输出的期望非空概率与环境最终记录的测量动作。审计只重新读取各 seed 的 `baseline_mappo/train/actions.csv` 计算目标，并读取三个分支的 validation 动作和 `measurement_quality.jsonl`；不重新训练、不打开 test episode、不修改原始数据。
+
+输出位于：
+
+```text
+logs/preliminary/measurement_rate_controlled_mappo_constraint_trace_seedset_7071_11127/rate_sampling_audit/
+plots/preliminary/measurement_rate_controlled_mappo_constraint_trace_seedset_7071_11127/rate_sampling_audit/
+```
+
+本次结构验收为 `audit_ok=true`：5 个 seed 的 applied/raw 目标均可复算，raw action 与 actor 概率日志错配为 `0`，动作掩码违规为 `0`，预算违规为 `0`，验证动作模式明确为 `deterministic_argmax`。75 个 raw 动作在环境侧发生了 transition invalidation，被单独计数，未被误判为概率或采样日志错误。validation 不是随机 Bernoulli 采样，因此不使用有限采样误差解释 raw 动作与期望概率的差异。
+
+rate 分支的期望概率接近 raw actor 目标的 seed 比例为 `3/5=0.6`，因此唯一主要判定为 `expected_rate_not_at_target`，而不是 `sampled_expected_rate_gap`。这说明当前约束目标来源和日志链路可追溯，但期望率本身尚未在足够多的 seed 上收敛到目标。下一步只检查 per-UAV 约束聚合、train/validation 分布差异和梯度路径；暂不增大系数、不重新训练、不修改 EKF、奖励或信道模型。
+
+## 测量率约束聚合—梯度路径审计（已完成，2026-08-29）
+
+新增只读入口 `run-measurement-rate-constraint-mechanism-audit`，读取上述五个随机种子的 `baseline_mappo`、`budgeted_quality_aware_mappo` 和 `rate_controlled_quality_aware_mappo` 训练/验证产物；不重新训练、不读取 test、不执行 optimizer step，也不修改原始 episode、checkpoint 或既有日志。输出位于：
+
+```text
+logs/preliminary/measurement_rate_controlled_mappo_constraint_trace_seedset_7071_11127/rate_constraint_mechanism_audit/
+plots/preliminary/measurement_rate_controlled_mappo_constraint_trace_seedset_7071_11127/rate_constraint_mechanism_audit/
+```
+
+## 信息增益—通信代价代理教师分支（五种子正式验证已完成，结构通过但效果未支持）
+
+为解决“测量数量已稳定，但测量质量仍不稳定且通信代价上升”的问题，新增了
+`proxy_guided_adaptive_budgeted_quality_aware_mappo` 分支。它在已有自适应测量率和固定 baseline-train 测量预算基础上，使用执行期可见的估计协方差、UWB 测量噪声、消息年龄和链路质量构造信息增益代理与预测通信代价，按
+
+```text
+utility = expected_information_gain_norm
+          - communication_cost_weight * predicted_communication_cost_norm
+```
+
+生成 `none` 始终保留的掩码 teacher 分布，并以 `teacher_coef=0.25`、`temperature=0.25` 的 KL 辅助损失只更新 measurement head；actor body、GAT、带宽/速度头、centralized critic、EKF、奖励和信道模型不变。代理尺度和测量预算仅由同一 seed 的 baseline `train` 数据拟合，validation 用于判断，test 只生成并封存。
+
+代理教师只读审计和 seed=2026 Smoke 已完成，随后使用 `7071、8080、9099、10118、11127` 完成了三分支五种子正式训练与 validation 对比。该分支仍不构成最终算法有效性结论，也不扩展5/7架无人机或安全支线。
+
+正式结果写入：
+
+```text
+data/synthetic/proxy_guided_adaptive_quality_mappo_seedset_7071_11127/
+logs/preliminary/proxy_guided_adaptive_quality_mappo_seedset_7071_11127/
+plots/preliminary/proxy_guided_adaptive_quality_mappo_seedset_7071_11127/
+```
+
+结构审计为 `audit_ok=true`、预算超限为 `0`，五个 seed 均满足测量率目标，且训练/validation/test 隔离通过。validation 中代理分支相对 baseline 的位置 RMSE 在 `4/5` 个 seed 改善，均值差异为 `-0.00904 m`，Bootstrap 95% 区间为 `[-0.01692,-0.00288]`；但有害协同更新比例均值增加 `0.09612`，团队奖励均值下降 `0.01930`，综合性能门控为 `decision_supported=false`。因此当前结论是：代理教师能够改善部分定位误差，但尚未稳定解决通信—协同定位问题，不能据此宣称算法整体有效。
+
+审计结果为 `audit_ok=true`，且目标率、manifest 配置、分支隔离和训练日志均可按 `seed × UAV` 追溯。训练约束日志的 500 条更新记录全部通过 per-UAV 字段有限性、非负性、目标绑定和加权损失闭合检查；代码路径也确认是“同一 UAV 内先平均期望非空概率，再对有效 UAV 的惩罚取平均”。由于不同 minibatch 对各 UAV 的样本覆盖数可能不同，不能把三个 per-UAV 汇总均值再次简单平均来重构 minibatch 级 aggregate loss，这种差异被记录为诊断信息而不是误判为聚合错误。
+
+对五个 rate-controlled checkpoint 的 autograd dry-run 全部完成；正约束残差存在时，measurement head 和质量输入路径的梯度均非零，checkpoint 哈希保持不变。train/validation 分布审计显示，约束实现和梯度路径存在，但固定系数 `0.5`、容差 `0.05` 尚未使期望测量率在五个 seed 上稳定贴近目标，当前主要原因判定为 `constraint_active_but_insufficient`，不是目标率绑定错误、per-UAV 聚合错误或梯度断路。该结论只说明测量率约束机制的诊断原因，不等于质量感知 MAPPO 已经取得性能优势；下一步应冻结当前代码和系数，按预注册方案重新设计约束能力验证，不盲目调大系数，也不修改 EKF、奖励、信道或无人机规模。
+
+## 执行期通信代价约束分支（实现与只读审计完成，2026-08-30）
+
+代理教师—EKF 更新质量审计将当前唯一主因判定为 `communication_cost_dominant`：代理排序和教师梯度路径基本正确，定位 RMSE 有改善趋势，但测量次数与通信代价增加并使团队奖励下降。为此新增 `communication_constrained_proxy_guided_mappo`，不修改环境奖励、EKF、GAT、信道或原有代理教师，而是对 measurement head 增加仅在 train 更新的单侧预期通信代价约束。
+
+候选代价定义为 `0.5 + 0.5 * (1 - q)`，其中固定 `0.5` 表示每次有效测量必然产生的一个 512 字节等效负载，剩余部分来自执行期可见链路风险；`none` 代价为 0。每个 seed/UAV 的目标只由 `baseline_mappo/train` 拟合，validation/test 不参与。新分支关闭原双侧测量率约束，保留硬预算、质量惩罚和代理教师；通信乘子范围固定为 `[0,5]`，步长 `0.25`、容差 `0.05`，辅助梯度只进入 measurement head。
+
+只读入口 `run-measurement-communication-cost-audit` 已在旧开发五种子上复算 133324 条 baseline-train 候选记录，确认代价全部有限且位于 `[0.5,1]`、`none=0`、五个 seed 的三架 UAV 目标均可追溯，未读取 validation/test 拟合目标。下一步按顺序执行 seed=2026 的 `2/5/5/5` Smoke；Smoke 和全量测试通过后，才使用预注册新种子 `12136、13145、14154、15163、16172` 完成确认性训练。
+
+## 定位指标口径与 EKF 更新持久性审计（2026-08-31）
+
+为避免把正式实验中逐坐标汇总的 RMSE 与 EKF 审计中的位置向量误差混用，新增了共享指标函数和 validation-only 的 `run-metric-consistency-audit`。新的主指标定义为：先对每个 UAV—时间戳计算
+`||p_hat - p_true||_2`，再对这些标量误差计算 RMSE 和 P95；历史的逐坐标 RMSE 保留为 `position_rmse_component_m`，仅用于追溯，不覆盖旧结果。审计使用 5 个训练 seed、3 个分支、每个分支 20 个 validation episode，确认两种口径存在系统性尺度差异：旧口径约为向量范数口径的 `0.57735`，与三维各向同性误差下的 `1/sqrt(3)` 一致。因此后续新的配对比较统一使用向量范数口径。
+
+指标审计输出：
+
+```text
+logs/preliminary/communication_constrained_proxy_mappo_seedset_12136_16172/metric_consistency_audit/
+plots/preliminary/communication_constrained_proxy_mappo_seedset_12136_16172/metric_consistency_audit/
+```
+
+同时扩展了 `run-ekf-update-persistence-audit` 的只读诊断：对每次接受的相对 UWB 更新追踪第 1、2、3、5 个后续诊断窗口，并区分 prediction-only、视觉里程计、机载 UWB 和后续协同 UWB 更新；事件级记录只作机制诊断，不作为独立样本。没有协同更新的 episode，其更新效果比例和条件性持久性指标写为 NA，并通过 `eventful_episode` 与 `cooperative_update_coverage` 单独报告覆盖率。
+
+持久性分解输出：
+
+```text
+logs/preliminary/communication_constrained_proxy_mappo_seedset_12136_16172/ekf_update_persistence_decomposition_audit/
+plots/preliminary/communication_constrained_proxy_mappo_seedset_12136_16172/ekf_update_persistence_decomposition_audit/
+```
+
+该审计的结构检查为 `audit_ok=true`：validation 的 300 个 episode 完整，测试集未读取，没有训练更新或 optimizer step，立即误差差值和线性协方差减少量均公式闭合。当前 focal branch 的机制诊断为 `benefit_not_persistent`：立即有益更新约占 `0.564`，有害更新约占 `0.351`，到第 5 个后续窗口仍保留的有益比例约为 `0.429`；在有协同更新的 seed 汇总中，线性协方差减少事件比例为 `1.0`，但由于保守协方差恢复，单次更新的 `J_loc` 立即变化仍为 0。该结果说明需要继续区分预测传播、更新调度、陈旧/NLOS 更新和协方差恢复的作用，不能据此直接修改奖励、增大权重或宣称 MAPPO 已解决通信—协同定位问题。
+
+本轮新增代码和审计均为只读分析，不改变 EKF、奖励、GAT、信道、检查点或既有实验目录。下一步应在冻结当前结果的前提下，基于持久性分解结果只选择一个可检验的最小修正方向；修正后先做 seed=2026 Smoke，再进行五种子验证。
+
+## 持久信息收益代理 MAPPO（代码已实现，实验待执行，2026-08-31）
+
+针对协同 EKF 单次更新收益在后续预测中衰减的问题，新增分支
+`persistent_proxy_guided_quality_mappo`。该分支不删除未知交叉相关条件下的保守协方差恢复，也不修改 EKF、奖励、GAT、信道或动作空间；它只在 measurement head 中加入固定三步预测的持久信息收益代理和代理教师损失。
+
+持久代理比较当前不更新与线性相对测距更新后的预测位置协方差迹差异，通信代价仍单独使用执行期可见链路质量和固定 512 bytes 负载建模。代理、预算和通信代价目标只使用同一随机种子的 baseline `train` 数据拟合，validation 用于诊断，test 不参与拟合、调参或模型选择。代理教师的 `teacher_coef=0.25`、`temperature=0.25` 和通信代价权重 `1.0` 固定，训练与验证结果不会自动替代旧实验。
+
+新增入口：
+
+```text
+run-persistent-proxy-audit
+run-persistent-proxy-guided-quality-mappo
+```
+
+当前状态：核心代码、分支隔离和测试已完成；修复配置透传与扩展尺度兼容性后，全量 `pytest` 已通过 `217 passed`，`main.py audit-symbols` 通过。持久代理只读审计已通过，输出位于：
+
+```text
+logs/preliminary/persistent_proxy_guided_quality_mappo_seedset_17181_21227/persistent_proxy_audit/
+plots/preliminary/persistent_proxy_guided_quality_mappo_seedset_17181_21227/persistent_proxy_audit/
+```
+
+`seed=2026` 的 `2/5/5/5` Smoke 已通过结构验收，输出位于：
+
+```text
+data/synthetic/persistent_proxy_guided_quality_mappo_smoke_seed2026_retry4/
+logs/preliminary/persistent_proxy_guided_quality_mappo_smoke_seed2026_retry4/
+plots/preliminary/persistent_proxy_guided_quality_mappo_smoke_seed2026_retry4/
+```
+
+Smoke 只证明接口、训练闭环、预算、通信负载、代理和数据隔离正常，不构成算法有效性结论。下一步才是使用固定配置和预注册种子 `17181、18190、19209、20218、21227` 进行 `20/100/20/20` 正式验证，并以 seed-level 配对区间作出结论。
+
+## 持久信息收益代理 MAPPO 五随机种子正式验证（已完成，结构通过但算法门未通过，2026-08-31）
+
+已使用预注册种子 `17181、18190、19209、20218、21227`，完成 `baseline_mappo` 与 `persistent_proxy_guided_quality_mappo` 两个分支的正式运行；每个分支均包含 `warm-up=20、train=100、validation=20、test=20`，共 10 个 `scale_3` 目录。逐目录 `episode-v1.3` 验证均为 `ok=true`，所有约束、预算、代理、状态和通信代价字段通过结构检查，test 已生成并封存，未用于拟合、模型选择或方案判断。
+
+正式结果位于：
+
+```text
+data/synthetic/persistent_proxy_guided_quality_mappo_seedset_17181_21227/
+logs/preliminary/persistent_proxy_guided_quality_mappo_seedset_17181_21227_formal/
+plots/preliminary/persistent_proxy_guided_quality_mappo_seedset_17181_21227_formal/
+```
+
+正式审计为 `audit_ok=true`，但 `decision_supported=false`，因此不能宣称该分支已经稳定解决通信—协同定位问题。相对 baseline，validation 位置 RMSE 仅 `3/5` 个 seed 改善，均值差异为 `-0.00146 m`，Bootstrap 95% 区间为 `[-0.01725, 0.01292]`，跨越 0；有害更新比例在 `5/5` 个 seed 下降，均值差异为 `-0.25142`，区间为 `[-0.39732, -0.09878]`，支持有害更新减少；`J_com` 均值差异为 `-0.02215`，但区间 `[-0.07891, 0.02424]` 跨越 0；团队奖励均值差异为 `+0.01846`，区间 `[-0.02019, 0.05710]` 也跨越 0。
+
+机制上，持久代理减少了测量和有害更新，但在 `17181`、`20218` 两个 seed 的 validation 中没有接受协同更新，在 `19209` 中仅接受 `0.1` 次（按 episode 平均）。这提示当前教师/通信代价路径可能过度抑制测量，或有效协同更新覆盖不足；由于正式结果尚未完成专门机制归因审计，暂不把它定性为唯一代码原因。当前应冻结本轮代码和结果，下一步只做 validation-only 的“代理效用—测量动作—有效 EKF 更新覆盖”机制审计，不调整教师系数、通信约束、EKF、奖励、GAT、信道或无人机规模，也不使用 test 选择方案。
+
+## 持久代理目标相对通信代价修正及新种子复现实验（已完成，2026-09-01）
+
+针对持久信息收益教师将每次测量的固定通信代价与链路风险重复相减、导致部分种子 `none` 选择过多的问题，新增了目标相对通信代价模式：只惩罚超过 baseline-train 通信目标的部分，保留固定测量预算、通信乘子、512 字节测量负载以及原有 EKF、奖励、GAT、信道和队列模型。baseline 分支保持关闭该模式，旧结果未被覆盖。
+
+首先对旧正式结果进行 validation-only 机制审计，结果为 `audit_ok=true`，主要原因一度显示为持久代理覆盖不足；随后完成目标相对代价修正的 seed=2026 Smoke，`2/5/5/5` 回合结构、预算、通信负载、代理、EKF 和 `episode-v1.3` 检查通过。
+
+之后使用新预注册种子 `22236、23245、24254、25263、26272` 完成 baseline 与 `persistent_proxy_guided_quality_mappo` 两个分支的 `20/100/20/20` 正式运行。结果目录为：
+
+```text
+data/synthetic/persistent_proxy_guided_quality_mappo_teacher_calibrated_seedset_22236_26272/
+logs/preliminary/persistent_proxy_guided_quality_mappo_teacher_calibrated_seedset_22236_26272_formal/
+plots/preliminary/persistent_proxy_guided_quality_mappo_teacher_calibrated_seedset_22236_26272_formal/
+```
+
+正式结构报告为 `audit_ok=true`、`decision_supported=false`。RMSE 在 `4/5` 个 seed 改善，但均值差异为 `-0.01591 m`，Bootstrap 95% 区间为 `[-0.03098, 0.00273]`，跨越 0；有害更新比例在 `3/5` 个 seed 未恶化，均值差异为 `-0.02082`，区间为 `[-0.06310, 0.02205]`，也跨越 0。`J_com` 均值差异为 `-0.00714`，区间为 `[-0.04194, 0.02822]`；团队奖励均值差异为 `-0.00891`，区间为 `[-0.05084, 0.03302]`。因此不能宣称持久代理 MAPPO 已稳定解决通信—协同定位问题。
+
+新种子机制审计为 `audit_ok=true`，但唯一主要原因是 `statistical_evidence_insufficient`：五个 seed 均未达到原“测量塌缩”触发阈值，说明目标相对代价修正消除了结构性 `none` 塌缩判据；但持久分支相对 baseline 的测量次数比例仍为约 `0.70、10.58、0.73、0.74、1.44`，跨种子异质性仍然很大。审计未读取 test、未调用训练更新或优化器，checkpoint 哈希保持不变；10 个正式分支的 `episode-v1.3` 验证均通过。
+
+当前应冻结这组代码和结果，不继续盲目修改教师、通信约束或 EKF。研究结论应写成：环境中的通信—协同定位权衡已经被暴露，目标相对通信代价修正改善了测量塌缩的结构风险，但 MAPPO 的稳定算法优势尚未得到 seed-level 统计支持。下一步若继续，应预注册更多训练 seed 或场景重复，或专门分析 train/validation 状态分布与测量动作概率的泛化；不得使用 test 反向调参，也不应扩展到 5/7 架无人机或同时改动核心物理模型。
+
+## 通信—协同定位 RMSE 稳定化（2026-09-01，当前执行中）
+
+当前新一轮修正仅包含两项可追溯性改进：正式 episode 指标新增按位置误差向量范数计算的 `position_rmse_norm_m`、`position_p95_norm_m` 和样本数，旧的逐坐标 `position_rmse_m` 保留；无接受协同更新的 episode 在诊断中标记 `update_quality_status=NA`，并单独报告 episode-level `update_coverage_rate`。此外，通信约束分支的代理 teacher 只惩罚超过 baseline-train 目标的通信代价，真实 512 字节队列负载、$J_{\mathrm{com}}$、预算、EKF、奖励、GAT 和信道实现不变。
+
+旧实验目录不覆盖。下一步先运行 seed=2026 的 `2/5/5/5` Smoke，通过后再用预注册新种子 `27281、28290、29309、30318、31327` 做五种子验证；结论只使用 validation 的 seed-level 配对统计，test 只生成并封存。
+
+## 通信—协同定位主线最终审计与可视化（2026-09-02）
+
+针对当前冻结的 `communication_constrained_proxy_mappo_stabilized_init_seedset_27281_31327`，新增 validation-only 的 `run-final-mainline-audit`。审计覆盖五个训练 seed、三个分支（`baseline_mappo`、`proxy_guided_adaptive_budgeted_quality_aware_mappo` 和 `communication_constrained_proxy_guided_mappo`），重新计算位置误差向量范数 RMSE/P95，并同时报告实际测量次数、512 字节负载、通信 KPI、$J_{\mathrm{com}}$、EKF 更新质量和 $J_{\mathrm{loc}}$。训练曲线按 `Update` 对齐，并以 seed 均值及 Bootstrap 95% 区间呈现；validation 指标与训练诊断不混用，test 未读取。
+
+最终输出位于：
+
+```text
+logs/preliminary/communication_constrained_proxy_mappo_stabilized_init_seedset_27281_31327/final_mainline_audit/
+plots/preliminary/communication_constrained_proxy_mappo_stabilized_init_seedset_27281_31327/final_mainline_figures/
+```
+
+结构报告为 `audit_ok=true`：五个 seed、三个分支和每个分支 20 个 validation episode 完整，episode-v1.3、指标一致性、EKF 持久性、512 字节负载不变量、有限性和数据隔离检查均通过。相对 baseline，通信约束主分支的向量范数 RMSE 均值差为 `-0.02026 m`，Bootstrap 95% 区间为 `[-0.04183,-0.00225]`，4/5 个 seed 改善；有害更新比例差为 `-0.04533`，区间为 `[-0.07138,-0.02104]`，4/5 个 seed 改善；但实际通信代价区间为 `[-0.20940,0.12438]`，$J_{\mathrm{com}}$ 区间为 `[-0.01940,0.00696]`，均未满足预注册的非劣效门限。因此 `decision_supported=false`，当前论文结论应限定为：主分支呈现定位和有害更新改善趋势，但尚未证明在通信代价不恶化条件下稳定优于 baseline；不能称为全面解决通信—协同定位问题。
+
+## 3-UAV 主线曲线归因审计（2026-09-02）
+
+新增只读命令 `run-mainline-curve-cause-audit`，仅使用冻结训练诊断和 validation 汇总解释训练奖励、MAPPO loss、通信代价、EKF 更新质量及 $J_{\mathrm{loc}}$ 曲线。该审计不读取 test、不重放环境、不调用训练更新，并在运行前后核对正式 checkpoint 与源表哈希。
+
+当前五种子结果确认：奖励低于 `-0.7` 的 135 个 update 全部对应碰撞；total loss 与 critic loss 的平均相关系数约为 `0.99993`，碰撞 update 的 critic loss 约为非碰撞 update 的 `3.21` 倍；4/5 个 seed 存在超过 `0.10` 的 baseline-train 通信目标到 baseline-validation 实际代价漂移；完整分支 5/5 个 seed 的确定性 argmax 实际代价比概率期望代价高 `0.05` 以上。当前种子上的 EKF 交互复核仍判定为 `visual_odometry_interaction`：约 `90.8%` 的下一有效更新是视觉里程计，至第 5 个窗口仅约 `32.5%` 的即时收益保持。$J_{\mathrm{loc}}$ 同时存在约 `24.8%` 的裁剪饱和和保守协方差恢复断点。因此下一步仍限定在 3 架 UAV，并按“VO 交互—确定性通信代价—单 episode PPO 方差”的顺序一次只验证一个最小修正。
+
+## 视觉里程计质量校准后的 3-UAV 正式验证（2026-09-02）
+## 视觉里程计质量校准后的 3-UAV 正式验证（2026-09-02）
+
+按照上述归因结果，已在不修改 EKF、奖励、GAT、信道、队列和动作空间的前提下，开启 `--vo-quality-calibration-enabled`，先完成 `seed=2026` 的 `2/5/5/5` Smoke，再完成五个种子 `27281、28290、29309、30318、31327` 的 `20/100/20/20` 正式训练与 validation 对比。正式实验覆盖 `baseline_mappo`、`proxy_guided_adaptive_budgeted_quality_aware_mappo` 和 `communication_constrained_proxy_guided_mappo` 三个分支，均为 3 UAV、Moderate、GNSS denied、CPU；视觉里程计质量模型只由 warm-up 数据拟合，validation/test 不参与拟合、调参或模型选择。
+
+正式结果位于：
+
+```text
+data/synthetic/communication_constrained_proxy_mappo_vo_calibrated_seedset_27281_31327/
+logs/preliminary/communication_constrained_proxy_mappo_vo_calibrated_seedset_27281_31327/
+plots/preliminary/communication_constrained_proxy_mappo_vo_calibrated_seedset_27281_31327/
+```
+
+15 个分支均通过 `episode-v1.3`，每个分支包含 100 个 train、20 个 validation 和 20 个 test episode；结构报告为 `audit_ok=true`，test 未用于判断。通信约束日志包含 500 条 train 更新，乘子只在 train 更新且范围为 `[0, 0.0645]`，512 字节测量负载和预算检查通过。
+
+但算法有效性门仍未通过：通信约束主分支相对 baseline 的位置向量范数 RMSE 均值差为约 `-0.0000075 m`，Bootstrap 95% 区间为 `[-0.02480, 0.02500]`，仅 3/5 个 seed 改善；$J_{\mathrm{com}}$ 均值差约 `+0.00071`，区间为 `[-0.01548, 0.02532]`；有害更新比例均值差约 `-0.02509`，区间为 `[-0.05580, 0.02627]`。因此视觉里程计质量校准改善了执行期可追溯性，但尚未证明 RMSE 在通信代价不恶化条件下稳定改善，不能将 MAPPO 表述为已经稳定解决通信—协同定位问题。
+
+正式报告和图表：
+
+```text
+logs/preliminary/communication_constrained_proxy_mappo_vo_calibrated_seedset_27281_31327/audit_report.json
+plots/preliminary/communication_constrained_proxy_mappo_vo_calibrated_seedset_27281_31327/communication_constrained_proxy_mappo.png
+```
+
+后续若继续推进，只能在冻结本轮结果后单独验证 `rollout_episodes_per_update=4` 的训练方差修正；不与通信约束、奖励或 EKF 修改同时进行，也不扩展到 5/7 架 UAV。
+
+## seed=42 弱强基线 corrected-v2（2026-09-03）
+
+已修复逐窗口协同 EKF 事件漏记与规则日志重复追加，采用每 UAV 累计接受计数增量核对。历史六方法共 120 个 validation 回合冻结重放通过：动作、真值轨迹、估计和奖励一致，原文件哈希未变。该修复修正机制统计，不意味着历史 RMSE 无效。
+
+新协议保持 3 UAV、50 步、CPU、原奖励和保守 EKF；仅运行 seed=42。R 为固定标称 VO 协方差及历史教师参照，P 只统一教师通信代价，T 只进一步改为四回合 PPO 更新并同步学习基线。各方案先 Smoke 后开发实验，最多三个开发配置，不自动搜索参数或扩展种子。当前实现和验收过程不等于 R/P/T 已完成，实际完成状态以各目录的 `audit_report.json` 为准。
+
+```powershell
+& 'C:\Users\lenovo\anaconda3\python.exe' main.py run-mainline-baseline-comparison --protocol corrected-v2 --stage replay-audit --experiment-arm reference
+& 'C:\Users\lenovo\anaconda3\python.exe' main.py run-mainline-baseline-comparison --protocol corrected-v2 --stage smoke --experiment-arm reference --figure-profile compact-mainline
+# 按 R Smoke→R 开发→P Smoke→P 开发→T Smoke→T 开发顺序运行；仅复用同版本已验收阶段
+& 'C:\Users\lenovo\anaconda3\python.exe' -m src.experiments.mainline_corrected_suite
+```
+
+输出位于 `data/synthetic/`、`logs/preliminary/`、`plots/preliminary/` 下的 `mainline_baseline_comparison_v2_seed42/<阶段>/<方案>/`；已有非空目录拒绝覆盖。旧输出保留。主图精简为累计回报、平均奖励、训练损失、定位误差、通信性能五张（PNG/PDF）；规则方法不伪造 loss。test 只由独立 schema 子进程检查，不用于拟合、候选选择或绘图。最终候选由预先固定的定位/通信/质量门选择；无候选合格时保留 R 参照并明确失败，不宣称跨初始化稳定。
+
+实现对应表：
+
+| 事项 | 实现 | 解释限制 |
+|---|---|---|
+| 完整窗口事件与累计计数核对 | `src/experiments/cooperative_event_logging.py` | 修复日志，不改变 EKF 更新 |
+| 历史冻结重放 | `src/experiments/mainline_corrected.py` | 只重放 validation，原随机机制 |
+| R/P/T 与配对共同时间前缀 | `src/experiments/mainline_corrected_stages.py` | 单训练种子的开发选型 |
+| 外生随机流 | `src/simulation/random_streams.py` | 新协议使用，旧模式保留 |
+| 通信候选代价 | `src/learning/measurement_cost.py` | 代理代价不等于字节或 J_com |
+| 槽位 MLP、多回合及辅助梯度 | `src/learning/mappo.py`、`src/experiments/formal.py` | T 的更新次数也变化 |
+| 固定监测与五张主图 | `src/experiments/training_monitor.py`、`src/experiments/mainline_compact_figures.py` | 不以曲线好看作为算法成功 |
+
+方法说明见 `sections/3_methods.md` 的 corrected-v2 小节：VO 使用相对位移及时间交叉协方差；邻居 CI 不解决全部交叉相关；J_loc 是裁剪协方差指标，不是 RMSE。当前 UWB 滤波使用仿真 LOS/NLOS 的噪声/偏差处理须作为理想化假设报告。
+
+## 训练稳定化协议 stabilized-v3（2026-09-04，seed=42 开发实验完成）
+
+针对 seed=42、3-UAV 开发实验中累计回报尖峰和 critic loss 尖峰，本协议在不改变物理环境、EKF、GAT、通信模型、动作空间和原始报告奖励的前提下，增加了可追溯的训练稳定化配置：PPO 使用独立的有界学习奖励通道，时间上限截断进行价值 bootstrap 但不跨 episode 递推 GAE，critic 可使用 Huber 损失和 value clipping，并设置目标 KL 早停；rollout 按 4 个完整 episode 聚合后更新。环境仍保留原始 `reward_total`、碰撞事件和四项奖励分解，`learning_reward_total` 只用于优化，不用于替换论文中的报告奖励。
+
+新协议使用分支一致初始化、固定标称视觉里程计协方差和 indexed 外生随机流；原 corrected-v2 及更早结果保持不变。新结果写入：
+
+```text
+data/synthetic/mainline_baseline_comparison_v3_seed42/
+logs/preliminary/mainline_baseline_comparison_v3_seed42/
+plots/preliminary/mainline_baseline_comparison_v3_seed42/
+```
+
+执行顺序 `replay-audit → stabilized-v3 smoke → stabilized-v3 development` 已完成。Smoke 和开发实验均通过接口、有限性、奖励闭合、终止掩码、预算和 512 字节负载检查；开发阶段为 `20/100/20/20`，六种方法的 validation 结果和规则基线均已生成。结果位于：
+
+```text
+data/synthetic/mainline_baseline_comparison_v3_seed42/development/reference/
+logs/preliminary/mainline_baseline_comparison_v3_seed42/development/reference/
+plots/preliminary/mainline_baseline_comparison_v3_seed42/development/reference/
+```
+
+结构报告为 `audit_ok=true`，但 `development_candidate_eligible=false`；这是单种子描述性比较，不是跨初始化稳定性证明。validation 中完整通信约束方法的向量范数 RMSE 为约 `0.4065 m`，GAT-MAPPO baseline 为约 `0.4080 m`；实际测量负载约 `42.7 kB` 对 `64.6 kB`，但 $J_{\mathrm{com}}$ 约 `0.0942` 对 `0.0376`，因此不能把本次结果表述为全面优于 baseline。精简主图保留累计报告回报、平均报告奖励、优化学习回报辅助面板、MAPPO total/actor/critic loss、定位误差和通信性能；原始曲线不被平滑或删除。
+
+## 相邻窗口定位反馈尺度修正 `core-framework-v4-delta-scale`（2026-09-06）
+
+针对 v4 中使用绝对协方差尺度归一化相邻窗口定位变化的问题，新增独立的
+`loc_progress_v2` 反馈模式。它只在同一 episode 内计算
+`d_t = u_(t-1) - u_t`，并仅用 warm-up 的相邻窗口差分拟合
+`s_delta_u = max(1.4826*MAD(d_t), 1e-3)`；训练反馈再将该比值裁剪到 `[-3, 3]`。
+episode 边界不求差分，validation/test 不重新拟合。报告奖励、RMSE、J_loc、J_com、
+EKF、GAT、通信模型和旧 v4 结果均保持不变。
+
+新协议入口为：
+
+```powershell
+& 'C:\Users\lenovo\anaconda3\python.exe' main.py run-mainline-baseline-comparison --protocol core-framework-v4-delta-scale --experiment-arm loc-progress-v2 --stage smoke
+& 'C:\Users\lenovo\anaconda3\python.exe' main.py run-mainline-baseline-comparison --protocol core-framework-v4-delta-scale --experiment-arm loc-progress-v2 --stage development
+```
+
+输出分别位于 `data/synthetic/mainline_core_framework_v4_delta_scale_seed42/`、
+`logs/preliminary/mainline_core_framework_v4_delta_scale_seed42/` 和
+`plots/preliminary/mainline_core_framework_v4_delta_scale_seed42/`。当前实现已完成
+单元测试，seed=42 的 Smoke 与 `20/100/20/20` development 均已完成，且对应
+`audit_report.json` 为 `audit_ok=true`；v2 统计文件保存 `delta_u_scale`、MAD、
+中位数、样本数、来源和下限保护标志，缺少尺度时拒绝运行。当前 development 的
+`delta_u_scale=0.001`，其 warm-up MAD 触发了下限保护，说明该反馈信号仍需谨慎解释。
+源码的 episode writer 现同时记录原始/裁剪后的定位进度、使用的尺度及尺度来源；本次
+已完成的 development 数据保留原始 `position_logdet_previous/current` 与裁剪反馈，
+不改写既有实验文件，原始差分可由冻结尺度重构。
+
+本轮还完成了 validation-only 的 VO 交互诊断，未读取 test、未更新参数、未修改
+checkpoint。结果显示主方法 accepted UWB 更新后的下一次有效更新中约 `97.3%`
+为视觉里程计；beneficial 更新的保持率由 h1 的约 `55.4%` 降至 h5 的约 `42.2%`，
+且协方差恢复使事件前后 `J_loc` 变化为 0。因此 v2 修正了相邻窗口反馈的归一化口径，
+但没有单独解决协同收益被后续 VO 交互削弱的问题。诊断输出位于：
+
+```text
+logs/preliminary/mainline_core_framework_v4_delta_scale_seed42/development/loc-progress-v2/vo_interaction_audit/
+plots/preliminary/mainline_core_framework_v4_delta_scale_seed42/development/loc-progress-v2/vo_interaction_audit/
+```
+
+本轮结论仍是 seed=42 的开发性证据，不能宣称跨随机初始化稳定或全面优于基线。
+以上VO交互结果仅说明相关性，不能单独证明VO造成收益衰减。
+
+## 2026-09-06：固定50步任务与直接报告奖励对照
+
+按更新后的研究决策，当前先执行有限时域对齐。新增 `report_direct` 真正绕过所有学习奖励裁剪与反馈；剩余时间输入actor body与critic，50步末端和碰撞终止均不bootstrap。原有模式保留。两组只训练seed=42的Proposed，规则基线共享直接奖励组train产生的预算与测量机会。
+
+入口：`python -m src.experiments.finite_horizon --stage smoke --arm report_direct --run-name mainline_finite_horizon_seed42/verified`。依次运行direct Smoke、existing Smoke、direct development、existing development；每组development需同版本Smoke通过。输出在data、logs、plots各自的 `mainline_finite_horizon_seed42/verified/` 下；首轮Smoke保留在上一层作为实现调试记录。当前不启动多种子训练。
+
+两组Smoke和100回合development均已完成，结构验收通过。最终全量测试：299 passed、5 skipped；符号审计293项通过。两组初始参数和共同归一化尺度一致，分析不读取test。
+
+直接奖励组相对共同参照：validation RMSE由0.428358降至0.425369 m，P95由0.723173降至0.712582 m；平均测量负载由0增至15308.8 bytes/episode，J_com由0.015546升至0.023216。两组validation碰撞均为3/20。直接奖励组固定监测RMSE从0.380399升至0.381571 m，因此本轮未达到综合改善标准。参照组无接受协同更新，有害更新比例为NA，不代表零有害率或证明直接奖励组更有害。
+
+配对表、共同时间前缀敏感性及有效配置见 `logs/preliminary/mainline_finite_horizon_seed42/verified/paired_comparison/`。两组各五张PNG/PDF及图注已生成；只作为seed=42开发证据，不追加训练或多种子实验。
+
+## 2026-09-06：测量动作密度干预诊断
+
+基于冻结的 `finite_horizon_report_direct` development Proposed checkpoint，完成20个validation回合的只读、配对测量选择干预。保持场景、障碍物、速度动作、带宽和外生过程不变，仅将测量源替换为当前actor可见候选的轮询选择；未读取test、未更新参数。
+
+结果：记录MAPPO在有候选窗口的非none测量比例为0.2167，接受协同EKF更新平均12.3次/回合；轮询选择比例为1.0，接受更新平均60.65次/回合。轮询相对记录策略的RMSE差值为-0.00945 m，Bootstrap 95%区间为[-0.02510, 0.00699]，P95差值为-0.03682 m；`J_loc`完全不变。轮询的`J_com`增加约0.02547，说明增加更新数量伴随通信代价上升。
+
+该诊断支持“当前策略协同测量不足、有效更新覆盖低”是优先问题，但尚不能证明轮询选择的邻居质量优于MAPPO，也不能证明定位改善具有统计确定性。输出见：
+
+```text
+logs/preliminary/mainline_finite_horizon_seed42/measurement_action_intervention/
+plots/preliminary/mainline_finite_horizon_seed42/measurement_action_intervention/measurement_density_intervention.png
+```
+
+干预审计将链路KPI和包事件差异保留为下游结果，不再错误地作为不变性失败；场景、运动动作、带宽和记录回放一致性仍严格检查。下一步应进行等测量预算的邻居选择干预，以区分“测得更多”与“选得更好”。
+
+## 2026-09-06：等测量预算邻居选择干预
+
+在同一20个validation场景上完成等预算配对回放。每个UAV/窗口严格保留Proposed记录的`none`/非`none`模式、带宽和速度动作，只替换测量邻居；质量感知候选的风险阈值只由train拟合，未使用validation/test结果。比较了Recorded MAPPO、等预算轮询和等预算质量感知三组。
+
+两种干预均保持每回合平均29.9次测量、15308.8 bytes负载。相对Recorded MAPPO，轮询的RMSE差值为-0.00538 m，95%区间[-0.02488, 0.01253]，效果不确定；等预算质量感知选择的RMSE差值为-0.00882 m，95%区间[-0.01831, -0.00157]，P95差值为-0.02137 m，95%区间[-0.04662, -0.00298]。质量感知选择使接受协同更新增加3.5次/回合，95%区间[1.75, 5.45]，J_com差值为-0.000225，区间[-0.000647, 0.000035]。
+
+该结果支持：在通信负载和测量密度不变时，邻居选择质量本身具有可观测影响；此前的性能不足不能只归因于测量次数过少。但质量感知选择是基于train拟合的actor可见启发式，不是重新训练的MAPPO，也不构成主方法优越性证明。当前下一步应将这种“质量感知、等预算”的选择反馈正式接入测量动作学习，再做独立Smoke；本轮不自动改写奖励或启动多种子确认。
+
+输出：
+
+```text
+logs/preliminary/mainline_finite_horizon_seed42/equal_budget_measurement_intervention/
+plots/preliminary/mainline_finite_horizon_seed42/equal_budget_measurement_intervention/equal_budget_measurement_intervention.png
+```
+
+## 2026-09-06：`core-framework-v5` 单种子稳定化开发
+
+按“先统一定义，再逐项修正训练反馈，再验证性能”的顺序，完成了 seed=42、3-UAV、Moderate、GNSS denied、CPU、50 步的四阶段开发：`report-clean`、`bounded-collision`、`loc-progress-v2`、`actual-load`，以及定位进度与实际负载的组合臂。每个阶段先完成 `2/5/5/5` Smoke，再完成 `20/100/20/20` development；所有阶段 `audit_ok=true`，test 未用于拟合、选型或绘图。
+
+结果根目录为：
+
+```text
+data/synthetic/mainline_core_framework_v5_report_direct_seed42/
+logs/preliminary/mainline_core_framework_v5_report_direct_seed42/
+plots/preliminary/mainline_core_framework_v5_report_direct_seed42/
+```
+
+其中 `actual-load` 与组合 development 由于源码版本在原 Smoke 后发生变化，按签名门禁重新生成到 `actual-load-rerun` 和 `loc-progress-actual-load-rerun`；旧目录保留，不覆盖。组合 development 的五张主图位于：
+
+```text
+plots/preliminary/mainline_core_framework_v5_report_direct_seed42/development/loc-progress-actual-load-rerun/
+```
+
+`report-clean` 的 Proposed validation 向量范数 RMSE/P95 为约 `0.4157/0.7092 m`，实际负载约 `9.16 kB`；单独加入定位进度反馈后为 `0.3872/0.6480 m`，但负载增至约 `59.65 kB`，说明定位反馈会诱导过度测量。组合反馈将其调整为约 `0.4036/0.6836 m`、`18.97 kB`，相对 `local_only_fixed`（`0.4360 m`）和 `random_cooperative`（`0.4138 m`）具有定位改善，同时低于 Random/Greedy 的约 `31.5 kB` 负载；`budgeted_greedy_ig` 的 RMSE 约 `0.3973 m`，仍是当前即时信息增益较强的规则基线，不能隐藏或宣称 Proposed 全面支配。
+
+训练诊断显示组合臂 25 次 PPO 更新的 loss 有局部波动，但 approximate KL 最大约 `0.011`、95% 分位约 `0.009`，没有灾难性策略发散；累计奖励仍会受碰撞和回合长度影响，不能要求逐回合单调收敛。定位进度尺度的 warm-up MAD 触发了 `0.001` 下限保护，因此该训练反馈的数值敏感性仍需在后续多 seed 验证中谨慎解释。
+
+本轮新增了同 arm 后缀 Smoke 的严格签名查找和阶段依赖查找，避免重试目录被误判为缺失，同时保持旧实验和 checkpoint 不变。当前结论仅是 seed=42 开发性通信—定位权衡，不是跨随机初始化稳定性证明；尚未启动五种子确认实验。
+
+### `core-framework-v8` 报告目标—有限时域—定位进度有序验证（2026-09-06）
+
+针对 v5/v7 中“学习通道与报告目标错位”和“50 步时间上限处理不一致”的问题，新增独立的 v8
+协议，不覆盖既有结果。`reference` 臂严格使用
+`R_learning = R_report`，保留真实碰撞惩罚和原始奖励，不使用势函数、附加负载反馈或碰撞分量截断；
+同时将 50 步作为有限时域终点，加入剩余时间特征并关闭时间上限 bootstrap，使用四个完整 episode
+后再更新一次 PPO。只有当直接报告奖励参照完成后，`loc-progress-v2` 臂才在相同有限时域设置下，
+叠加同一 episode 内、由 warm-up 相邻窗口 MAD 拟合尺度的定位进度反馈。
+
+v8 输出写入：
+
+```text
+data/synthetic/mainline_core_framework_v8_seed42/
+logs/preliminary/mainline_core_framework_v8_seed42/
+plots/preliminary/mainline_core_framework_v8_seed42/
+```
+
+该协议的 `report_plus_feedback` 仅用于定位进度臂：其基础项仍为物理报告奖励，附加项单独记录，
+不再沿用历史“碰撞惩罚上限 + 总奖励裁剪”的学习目标。两臂均使用 sampled-action log-prob、
+Huber critic、value clipping、actor/critic 分组梯度裁剪和 action-conditioned measurement head。
+Smoke 通过只说明定义、数据闭合和训练链路可运行；最终是否改善仍以 validation 的 RMSE、P95、
+实际通信负载和更新质量判断，seed=42 不代表跨随机初始化稳定性。
+
+### `core-framework-v8` 时序资格掩码修正开发结果（2026-09-07）
+
+在三链路诊断确认决策间隔为 `0.2 s`、UWB 同一链路更新周期为 `0.8 s` 后，新增可选的
+`measurement_update_eligibility_enabled`。开启时，观测动作掩码和环境执行校验共同禁止在
+链路更新周期尚未到达时重复选择同一测量源；关闭时仍保持历史行为兼容。该修正不改变 EKF、
+GAT、奖励、信道、队列、512-byte 负载或动作空间，只消除已知的无效重复测量。
+
+seed=42、3-UAV 的 Smoke 与 `20/100/20/20` development 均完成，独立输出为：
+
+```text
+data/synthetic/mainline_core_framework_v9_timing_seed42/
+logs/preliminary/mainline_core_framework_v9_timing_seed42/
+plots/preliminary/mainline_core_framework_v9_timing_seed42/
+```
+
+Smoke 和 development 的 `audit_ok` 均为 `true`；训练、validation 和 test schema 链路通过，
+全量测试为 `311 passed, 5 skipped`，符号审计通过。development 中 Proposed 的训练阶段选中
+非 `none` 动作由 `8375` 次降至 `4863` 次，而有效协同更新由 `4051` 次升至 `4269` 次，
+选中动作到有效更新的比例约由 `0.484` 提升至 `0.878`，说明主要修复确实作用于时序无效测量。
+
+validation 的 Proposed 结果为 RMSE/P95 `0.42463/0.71183 m`、实际负载约 `4.15 kB/episode`、
+`J_com=0.02663`；相较历史 v8 Proposed 的 `0.42537/0.71258 m`、`15.31 kB/episode`，
+定位精度基本持平而实际负载明显下降。与同一轮规则方法相比，Proposed 优于 `local_only_fixed`
+（RMSE `0.43604 m`）并显著低于 Random/Greedy 的通信负载，但 RMSE 仍略差于
+`random_cooperative`（`0.42242 m`）和 `budgeted_greedy_ig`（`0.40343 m`）。因此该轮只能
+确认“时序约束减少了无效通信并保留了接近原水平的定位性能”，不能宣称 Proposed 已全面优于
+强规则基线或已获得跨随机种子稳定性。`core-framework-v9` 的根目录名称仅用于区分输出；其
+有效配置仍记录为 `core-framework-v8` 加时序资格掩码，避免把一次实现修正误称为完整新协议。
+
+### `core-framework-v10-safety` 联合安全执行与奖励曲线终止归因（2026-09-07）
+
+本轮只修正安全执行时序和奖励图标记，不改变奖励权重、EKF、GAT、MAPPO、信道、队列或
+物理噪声。v10 使用 `safety_execution_mode=joint_swept_v1`：所有 UAV 的候选运动与动态
+障碍物一步预测在同一副本上联合检查，覆盖 UAV--UAV 端点距离、线段交叉、动态障碍物扫掠
+路径和边界越界；冲突动作对称投影后再提交，最终仍执行物理碰撞检查。旧 v3/v4/v9 及其他
+历史结果和 checkpoint 保持不变。
+
+seed=42、3-UAV、Moderate、GNSS denied、50 步、四回合 rollout 的 Smoke 与
+`20/100/20/20` development 均完成，`audit_ok=true`。针对新增几何与终止分类的测试为
+`36 passed`；全量测试为 `318 passed, 5 skipped`，符号审计通过。v10 输出位于：
+
+```text
+data/synthetic/mainline_core_framework_v10_safety_seed42/
+logs/preliminary/mainline_core_framework_v10_safety_seed42/
+plots/preliminary/mainline_core_framework_v10_safety_seed42/
+```
+
+训练图中的 `X` 只表示 `collision` 终止，空心 `△` 只表示非碰撞 `early_termination`；
+达到 50 步的 `time_limit` 回合不标记，缺少可靠原因的 `unknown_short` 只在审计中报告。development
+的 Proposed 训练归因表包含 100 个回合，其中 87 个为 `time_limit`、13 个为 `collision`，
+没有被错误归为普通提前终止。五张主图保留原始累计报告回报、PPO 学习回报、回合长度、训练
+loss 以及 validation 的定位/通信基线比较；该结果用于安全执行和数据语义验证，seed=42 不代表
+跨随机初始化稳定性，也不等于已经证明算法性能全面优于基线。
+
+### `core-framework-v11-comm-occluder` 纯通信遮挡区域语义（2026-09-07）
+
+v11 将 `screening_moving_nlos_screen` 明确定义为纯通信遮挡区域：它继续参与
+`line_of_sight`、LOS/NLOS 判定、丢包与链路质量计算，但不参与物理碰撞、保护距离违规、
+安全投影或动态实体障碍物风险特征。真实建筑物和动态车辆仍然是实体障碍物。v11 同时
+开启动态实体障碍物运动特征，使策略能够观察物理动态障碍物的运动/接近趋势；通信遮挡区域
+仍只作为通信几何存在。v10 及更早结果保留历史语义，不被重写。
+
+v11 的独立输出目录为：
+
+```text
+data/synthetic/mainline_core_framework_v11_comm_occluder_seed42/
+logs/preliminary/mainline_core_framework_v11_comm_occluder_seed42/
+plots/preliminary/mainline_core_framework_v11_comm_occluder_seed42/
+```
+
+该版本用于验证模型语义和碰撞归因；碰撞减少不能自动等同于策略性能全面提升，仍需结合
+validation 的 RMSE、P95、实际通信负载和安全指标判断。
+
+### `core-framework-v8` 动作—EKF—延迟反馈链路诊断（2026-09-07）
+
+在不覆盖 v8/v9/v10 历史结果的前提下，新增 `action-linked-feedback` 独立 Smoke 和
+`20/100/20/20` development。该分支只把“当前选中的邻居是否产生了可接受的 EKF 更新”转换为
+延迟一个决策窗口的训练诊断反馈；反馈使用接受更新前的线性协方差变化和 NIS 一致性，明确标记为
+训练信用代理，保守恢复后的本机边际协方差仍是物理报告状态。动作 CSV 同时增加候选数、时序资格数、
+时序过滤数以及 `none` 选择原因等可选扩展列，旧 `episode-v1.3` 数据仍可读取。
+
+独立输出位于：
+
+```text
+data/synthetic/mainline_core_framework_v8_action_feedback_v2_seed42/
+logs/preliminary/mainline_core_framework_v8_action_feedback_v2_seed42/
+plots/preliminary/mainline_core_framework_v8_action_feedback_v2_seed42/
+```
+
+新增 `action_feedback_diagnostic/` 四张表和一张四面板诊断图，分别检查逐邻居 EKF 结果、
+时序掩码下的 `none` 来源、逐回合有效更新—RMSE 关系以及延迟反馈是否真正产生。Smoke 与
+development 的 `audit_ok=true`；全量测试为 `319 passed, 5 skipped`，符号审计通过，诊断报告
+明确 `test_access_attempts=0`。
+
+development 的 Proposed validation 向量范数 RMSE/P95 约为 `0.4004/0.6869 m`，低于同轮
+`local_only_fixed` 的 `0.4360/0.7338 m`、`random_cooperative` 的 `0.4240/0.6982 m` 和
+`budgeted_greedy_ig` 的 `0.4055/0.6769 m`，但实际负载约 `29.54 kB/episode`，显著高于
+Random/Greedy 的约 `16.67/16.54 kB/episode`；有效更新约 `1.134/window`，也明显高于规则方法。
+因此这次链路修正支持“协同更新数量增加可以带来定位收益”，但尚不支持“Proposed 通过更优邻居
+选择获得通信效率优势”。六个有向邻居对的线性协方差收益均约 `0.08`，区分度很弱；当前最
+根本瓶颈是 EKF 对候选邻居的可区分反馈不足，下一轮应优先使质量/链路差异在不泄露真值的前提下
+进入实际测量不确定度或候选动作特征，再单独验证，不能继续靠提高更新频率或反馈系数制造优势。
+### `core-framework-v8` 动作—EKF反馈方向修正后的独立结果（2026-09-07）
+
+在上一轮链路诊断中发现总位置协方差迹对各邻居几乎没有区分度后，新增了不使用真值的方向信息
+占比：
+`local_direction_variance / (local_direction_variance + effective_measurement_variance)`，
+并与 NIS 一致性共同构成延迟反馈。该项只改变 Proposed 的训练信用代理，不改变 EKF 更新、保守
+协方差恢复、报告奖励或通信模型；v2 结果保留为历史诊断。
+
+当前代码一致的 Smoke/development 独立输出为：
+
+```text
+data/synthetic/mainline_core_framework_v8_action_feedback_v3_seed42/
+logs/preliminary/mainline_core_framework_v8_action_feedback_v3_seed42/
+plots/preliminary/mainline_core_framework_v8_action_feedback_v3_seed42/
+```
+
+两阶段 `audit_ok=true`，全量测试与符号审计通过。development 的 Proposed validation
+RMSE/P95 为 `0.4318/0.7288 m`，实际负载约 `1.97 kB/episode`；相较之下 Random/Greedy
+分别约为 `0.4162/0.6900 m`、`0.4034/0.6792 m`，负载约 `15.46/15.31 kB/episode`。
+该修正显著抑制了 Proposed 的测量数量，但也使有效更新约降到 `0.088/window`，定位收益随之
+消失。因而本轮执行结果否定了“只加入方向信息反馈即可同时获得定位和通信优势”的假设；当前主要
+问题已从“反馈没有延迟”收敛为“可用邻居的可区分质量差异不足，且方向反馈使 Proposed 过度
+选择 `none`”。按修正后的动作行口径，validation 中有候选可用的 2709 个动作行里仅 77 个
+选择非 `none`，约 `97.2%` 仍选择 `none`；其中仅 33 个动作行是时序掩码强制产生的 `none`。
+不能把低负载误写成算法更优，下一步应在固定测量预算的动作干预中验证候选质量是否真正改变
+UWB 更新质量，再决定是否保留该反馈。seed=42 仍只是开发证据。
+
+### `core-framework-v9-action-selection` 候选动作选择修正（2026-09-07，Smoke 待执行）
+
+针对 v8 action-feedback-v3 中 validation 合法候选下约 `97.2%` 选择 `none`、而训练阶段非
+`none` 比例明显更高的训练—验证动作分布错位，新增独立 v9 协议。v9 不修改 Local EKF、
+GAT 消息传递、MAPPO 物理报告奖励、通信队列或 UWB 更新公式，也不删除 `none`。控制臂使用
+`report_direct + action_conditioned_v2`；动作头修正臂使用 `report_direct + action_conditioned_v3`，
+把当前 actor 可见的候选协方差/测量方差代理、链路质量、AoI、队列和可行性特征逐候选输入，
+并给 `none` logit 增加候选集合摘要；反馈臂才使用 warm-up 归一化的、仅对实际选择且被接受
+的 EKF 更新释放的相对 `none` 延迟反馈。三臂均保留 sampled-action log-prob、四 episode
+rollout、有限时域和原有稳定训练配置。
+
+v9 预定输出根目录为：
+
+```text
+data/synthetic/mainline_core_framework_v9_action_selection_seed42/
+logs/preliminary/mainline_core_framework_v9_action_selection_seed42/
+plots/preliminary/mainline_core_framework_v9_action_selection_seed42/
+```
+
+除五张主图外，新增 `action_selection_diagnostic.png`，仅用于比较 train/validation 的
+候选可用时非 `none` 率、`none` 概率、最佳候选与 `none` 的 logit 差和候选质量—选择关系；
+它不是论文性能证据。计划先分别完成三臂 `2/5/5/5` Smoke，只有动作分布诊断支持动作头
+修正后才最多选择一臂进行 `20/100/20/20` development。旧 v8/v3 结果、checkpoint 和
+图表不覆盖；test 不参与拟合、选型或动作诊断。当前 v9 代码和测试接口已落地，正式 Smoke
+尚未执行，故不能提前宣称 `none` 率或定位—通信性能已经改善。
+
+### Typora 阶段性汇报文档（2026-09-07）
+
+根据最新 seed=42、3-UAV development 结果整理了图文汇报：
+
+```text
+sections/advisor_report_seed42_v10.md
+plots/preliminary/advisor_report_seed42_v10/
+```
+
+报告重点说明 Proposed 相对 Local/Random 的定位改善、相对 Greedy 的差距、实际通信负载偏高，
+以及训练奖励尖峰、碰撞终止和单种子证据边界。
+
+### 单无人机最小闭环 sanity 训练（2026-09-09）
+
+为降低起步复杂度，正式实验入口现在支持 `uav_count=1`，并新增 `--scenario-seed` 用于固定
+生成场景的几何布局。单无人机运行中图网络只保留虚拟 self-loop，测量动作只有合法的 `none`，
+不存在无人机间通信、协同 UWB 或邻居更新，因此该结果只用于验证单智能体 PPO/MAPPO 代码、
+EKF、日志、checkpoint 和绘图链路，不能作为协同定位算法有效性结论。
+
+已完成一轮短训练：
+
+```text
+data/synthetic/single_uav_sanity_seed2026/
+logs/preliminary/single_uav_sanity_seed2026/
+plots/preliminary/single_uav_sanity_seed2026/
+```
+
+配置为固定场景布局、1 架 UAV、5 步/回合、2 个 warm-up、5 个训练回合、2 个 validation 回合
+和 2 个 test 回合；训练更新 5 次，`parameter_delta.delta_l2=0.1399812698`，schema 验证通过。
+相关代码测试为 `38 passed`。下一阶段应先在 2 架 UAV、单条可用链路的简单 LOS 场景中恢复协同
+通信，再回到 3 架 Moderate 场景；单机 sanity 的 validation/test 不用于反向调参。

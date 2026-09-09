@@ -1,0 +1,59 @@
+# Python environments and caches
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE and local tooling state
+.idea/
+.vscode/
+
+# Generated experiment data and logs
+data/
+logs/
+*.log
+*.jsonl
+
+# Generated temporary PowerPoint workspaces and inspection artifacts
+tmp_ppt_edit_*/
+tmp_ppt_inspect/
+*.inspect.ndjson
+
+# Personal or binary presentation artifacts
+*.ppt
+*.pptx
+*.pptx.*
+
+# Literature PDFs are kept locally; publish only the Markdown notes
+knowledge/**/*.pdf
+
+# Model weights and serialized checkpoints
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.pkl
+*.pickle
+*.joblib
+*.h5
+*.hdf5
+*.bin
+
+# Local databases and archives
+*.sqlite
+*.sqlite3
+*.db
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
