@@ -384,6 +384,27 @@ REWARDS_EXTENDED_COLUMNS: tuple[str, ...] = REWARDS_COLUMNS + (
     "accepted_update_feedback_records_json",
     "released_update_feedback_records_json",
     "pending_update_feedback_count",
+    # Explicit localization-first single-UAV learning diagnostics.  These
+    # fields are additive and therefore remain outside the required legacy
+    # reward contract.
+    "single_uav_learning_mode",
+    "single_uav_learning_active",
+    "communication_applicable",
+    "communication_reward_in_learning",
+    "single_uav_localization_progress_delta",
+    "single_uav_localization_progress_scale",
+    "localization_progress_score",
+    "single_uav_localization_component",
+    "previous_goal_distance",
+    "current_goal_distance",
+    "goal_progress_delta",
+    "goal_progress_scale",
+    "goal_progress_score",
+    "single_uav_goal_component",
+    "single_uav_learning_energy_cost",
+    "single_uav_learning_collision_cost",
+    "single_uav_learning_core",
+    "single_uav_learning_reward",
 )
 
 EPISODE_OBSTACLE_COLUMNS: tuple[str, ...] = EPISODE_COMMON_COLUMNS + (

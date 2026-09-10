@@ -83,6 +83,18 @@ class RewardConfig:
         }
     )
 
+    # Optional single-UAV learning channel.  ``off`` preserves the historical
+    # learning reward exactly.  ``loc_goal_v1`` is enabled explicitly for the
+    # localization-first single-UAV baseline; it never changes the reporting
+    # reward or the physical communication metrics.
+    single_uav_learning_mode: str = "off"
+    single_uav_learning_weights: Mapping[str, float] = field(
+        default_factory=lambda: {
+            "localization_progress": 0.8,
+            "goal_progress": 0.2,
+        }
+    )
+
     # The historical reporting reward is kept intact.  The optional learning
     # channel is bounded and is passed to PPO separately by the formal runner.
     learning_reward_mode: str = "legacy"
@@ -114,6 +126,34 @@ class RewardConfig:
     potential_epsilon: float = 1e-6
 
     def __post_init__(self) -> None:
+        if self.single_uav_learning_mode not in {"off", "loc_goal_v1"}:
+            raise ValueError(
+                "single_uav_learning_mode must be off or loc_goal_v1"
+            )
+        if not isinstance(self.single_uav_learning_weights, Mapping):
+            raise ValueError("single_uav_learning_weights must be a mapping")
+        expected_single_uav_weight_keys = {
+            "localization_progress",
+            "goal_progress",
+        }
+        if set(self.single_uav_learning_weights) != expected_single_uav_weight_keys:
+            raise ValueError(
+                "single_uav_learning_weights must contain exactly "
+                "localization_progress and goal_progress"
+            )
+        single_uav_weight_values = [
+            float(self.single_uav_learning_weights[key])
+            for key in sorted(expected_single_uav_weight_keys)
+        ]
+        if any(
+            not np.isfinite(value) or value < 0.0
+            for value in single_uav_weight_values
+        ):
+            raise ValueError(
+                "single_uav_learning_weights must contain finite non-negative values"
+            )
+        if not np.isclose(sum(single_uav_weight_values), 1.0, atol=1e-8):
+            raise ValueError("single_uav_learning_weights must sum to one")
         if self.learning_reward_mode == "report_direct" and (
             self.learning_feedback_mode != "v3" or self.learning_potential_coef != 0.0
             or self.loc_progress_coef != 0.0 or self.actual_measurement_cost_enabled
@@ -246,6 +286,20 @@ class RewardConfig:
                 or float(self.potential_statistics["delta_u_scale"]) <= 0.0
             ):
                 raise ValueError("potential_statistics[delta_u_scale] must be positive")
+            if "delta_goal_scale" in self.potential_statistics and (
+                not np.isfinite(float(self.potential_statistics["delta_goal_scale"]))
+                or float(self.potential_statistics["delta_goal_scale"]) <= 0.0
+            ):
+                raise ValueError(
+                    "potential_statistics[delta_goal_scale] must be positive"
+                )
+            if self.single_uav_learning_mode == "loc_goal_v1":
+                for key in ("delta_u_scale", "delta_goal_scale"):
+                    if key not in self.potential_statistics:
+                        raise ValueError(
+                            "loc_goal_v1 requires "
+                            f"potential_statistics[{key}]"
+                        )
 
     @property
     def lambda_coll(self) -> float:
@@ -426,6 +480,7 @@ class MultiUAVJointEnv:
         self.scenario_metadata: dict[str, Any] = {}
         self._learning_potential = 0.0
         self._previous_position_logdet = 0.0
+        self._previous_estimated_goal_distance = 0.0
         self._pending_update_feedback: list[dict[str, Any]] = []
         self._last_update_feedback_records: list[dict[str, Any]] = []
 
@@ -443,6 +498,24 @@ class MultiUAVJointEnv:
                 logdet = float(np.log(diagonal).sum())
             if np.isfinite(logdet):
                 values.append(float(logdet))
+        return float(np.mean(values)) if values else 0.0
+
+    def estimated_goal_distance(self) -> float:
+        """Return mean EKF-estimated distance to each configured goal.
+
+        This helper deliberately uses the EKF state and the configured goal,
+        never the simulator truth state.  The formal warm-up fitter and the
+        single-UAV learning reward therefore share the same observable
+        quantity.
+        """
+
+        values: list[float] = []
+        for uav_id, ekf in self.ekfs.items():
+            goal = np.asarray(self.goals.get(uav_id, np.zeros(3)), dtype=float)
+            estimate = np.asarray(ekf.state[:3], dtype=float)
+            distance = float(np.linalg.norm(estimate - goal))
+            if np.isfinite(distance):
+                values.append(distance)
         return float(np.mean(values)) if values else 0.0
 
     def _learning_progress_potential(self, j_com: float) -> tuple[float, float, float]:
@@ -577,6 +650,7 @@ class MultiUAVJointEnv:
         self.queue_state = self.snapshot.queue_next.copy()
         self.graph_batch = self._build_graph_batch()
         self._previous_position_logdet = self._position_logdet_uncertainty()
+        self._previous_estimated_goal_distance = self.estimated_goal_distance()
         if self.config.reward.learning_reward_mode == "progress_potential_v2":
             self._learning_potential = self._learning_progress_potential(0.0)[0]
         obs = self._observations()
@@ -2441,6 +2515,18 @@ class MultiUAVJointEnv:
         # never changed.
         current_position_logdet = self._position_logdet_uncertainty()
         previous_position_logdet = float(self._previous_position_logdet)
+        current_goal_distance = self.estimated_goal_distance()
+        previous_goal_distance = float(self._previous_estimated_goal_distance)
+        single_uav_learning_active = bool(
+            len(self.uav_ids) == 1
+            and self.config.reward.single_uav_learning_mode == "loc_goal_v1"
+        )
+        single_uav_localization_progress_delta = float(
+            previous_position_logdet - current_position_logdet
+        )
+        single_uav_goal_progress_delta = float(
+            previous_goal_distance - current_goal_distance
+        )
         potential_statistics = self.config.reward.potential_statistics or {}
         if self.config.reward.learning_feedback_mode == "loc_progress_v2":
             progress_scale = max(
@@ -2461,6 +2547,66 @@ class MultiUAVJointEnv:
             else loc_progress_delta_raw
         )
         self._previous_position_logdet = current_position_logdet
+        self._previous_estimated_goal_distance = current_goal_distance
+        single_uav_localization_progress_scale = max(
+            float(potential_statistics.get("delta_u_scale", 1.0)),
+            float(self.config.reward.potential_epsilon),
+        )
+        single_uav_goal_progress_scale = max(
+            float(potential_statistics.get("delta_goal_scale", 1.0)),
+            float(self.config.reward.potential_epsilon),
+        )
+        if single_uav_learning_active:
+            # RewardConfig validates these for an explicitly configured
+            # loc_goal_v1 environment.  Keep this guard close to the actual
+            # calculation so an accidentally unfitted direct environment
+            # fails with a useful message rather than silently using scale 1.
+            for required_scale in ("delta_u_scale", "delta_goal_scale"):
+                if required_scale not in potential_statistics:
+                    raise RuntimeError(
+                        "loc_goal_v1 requires warm-up-fitted "
+                        f"potential_statistics[{required_scale}]"
+                    )
+        single_uav_localization_progress_score = float(
+            np.tanh(
+                single_uav_localization_progress_delta
+                / single_uav_localization_progress_scale
+            )
+            if single_uav_learning_active
+            else 0.0
+        )
+        single_uav_goal_progress_score = float(
+            np.tanh(
+                single_uav_goal_progress_delta / single_uav_goal_progress_scale
+            )
+            if single_uav_learning_active
+            else 0.0
+        )
+        single_uav_learning_weights = self.config.reward.single_uav_learning_weights
+        single_uav_localization_component = float(
+            single_uav_learning_weights["localization_progress"]
+            * single_uav_localization_progress_score
+        )
+        single_uav_goal_component = float(
+            single_uav_learning_weights["goal_progress"]
+            * single_uav_goal_progress_score
+        )
+        single_uav_learning_collision_cost = float(
+            min(collision_cost, float(self.config.reward.learning_collision_penalty_cap))
+        )
+        single_uav_learning_core = float(
+            single_uav_localization_component
+            + single_uav_goal_component
+            - energy_cost
+            - single_uav_learning_collision_cost
+        )
+        single_uav_learning_reward = float(
+            np.clip(
+                single_uav_learning_core,
+                -float(self.config.reward.learning_reward_clip),
+                float(self.config.reward.learning_reward_clip),
+            )
+        )
         actual_measurement_count = int(
             sum(
                 str(actions[uav_id].get("measurement_uav_id", "none")) not in {"none", uav_id}
@@ -2539,6 +2685,12 @@ class MultiUAVJointEnv:
             learning_reward = float(team_reward)
             learning_collision_cost = float(collision_cost)
             potential_shaping = 0.0
+        if single_uav_learning_active:
+            # Explicit single-UAV mode uses a separate learning channel.
+            # The reporting reward and physical communication metrics above
+            # remain unchanged; no-link communication fallbacks are therefore
+            # not charged to this PPO reward.
+            learning_reward = single_uav_learning_reward
         self._learning_potential = potential_for_shaping
         reward_components = {
             uav_id: {
@@ -2557,9 +2709,16 @@ class MultiUAVJointEnv:
             "learning_progress_potential": float(progress_potential),
             "learning_progress_logdet_uncertainty": float(progress_uncertainty_logdet),
             "learning_progress_normalized_j_com": float(progress_normalized_j_com),
+            "communication_applicable": bool(len(self.uav_ids) > 1),
+            "single_uav_learning_mode": str(
+                self.config.reward.single_uav_learning_mode
+            ),
+            "single_uav_learning_active": bool(single_uav_learning_active),
             "learning_reward_components": {
                 "mode": self.config.reward.learning_reward_mode,
                 "reporting_reward": float(team_reward),
+                "reporting_reward_total": float(team_reward),
+                "learning_reward_total": float(learning_reward),
                 "bounded_reward": float(bounded_learning_reward),
                 "potential": float(reporting_potential),
                 "progress_potential": float(progress_potential),
@@ -2570,6 +2729,38 @@ class MultiUAVJointEnv:
                 "collision_cost_raw": float(collision_cost),
                 "collision_cost_learning": float(learning_collision_cost),
                 "energy_cost": float(energy_cost),
+                "communication_applicable": bool(len(self.uav_ids) > 1),
+                "communication_reward_in_learning": bool(
+                    not single_uav_learning_active
+                ),
+                "single_uav_learning_mode": str(
+                    self.config.reward.single_uav_learning_mode
+                ),
+                "single_uav_learning_active": bool(single_uav_learning_active),
+                "single_uav_localization_progress_delta": float(
+                    single_uav_localization_progress_delta
+                ),
+                "single_uav_localization_progress_scale": float(
+                    single_uav_localization_progress_scale
+                ),
+                "localization_progress_score": float(
+                    single_uav_localization_progress_score
+                ),
+                "single_uav_localization_component": float(
+                    single_uav_localization_component
+                ),
+                "previous_goal_distance": float(previous_goal_distance),
+                "current_goal_distance": float(current_goal_distance),
+                "goal_progress_delta": float(single_uav_goal_progress_delta),
+                "goal_progress_scale": float(single_uav_goal_progress_scale),
+                "goal_progress_score": float(single_uav_goal_progress_score),
+                "single_uav_goal_component": float(single_uav_goal_component),
+                "single_uav_learning_energy_cost": float(energy_cost),
+                "single_uav_learning_collision_cost": float(
+                    single_uav_learning_collision_cost
+                ),
+                "single_uav_learning_core": float(single_uav_learning_core),
+                "single_uav_learning_reward": float(single_uav_learning_reward),
                 "learning_feedback_mode": feedback_mode,
                 "v3_learning_reward": float(v3_learning_reward),
                 "position_logdet_previous": float(previous_position_logdet),
@@ -2651,6 +2842,7 @@ class MultiUAVJointEnv:
                 "aoi_normalized": aoi_norm,
                 "connectivity": connectivity,
                 "connectivity_normalized": connectivity_norm,
+                "communication_applicable": bool(len(self.uav_ids) > 1),
                 "connectivity_definition": "largest_connected_component_fraction",
                 "metric_scale_source": self.config.reward.metric_scale_source,
                 "uncertainty_normalization": self.config.reward.uncertainty_normalization,
@@ -2754,6 +2946,10 @@ class MultiUAVJointEnv:
             # ``none`` while every candidate waits for its UWB period.
             "measurement_action_diagnostics": copy.deepcopy(
                 self.measurement_action_diagnostics
+            ),
+            "communication_applicable": bool(len(self.uav_ids) > 1),
+            "single_uav_learning_mode": str(
+                self.config.reward.single_uav_learning_mode
             ),
             "learning_reward_mode": self.config.reward.learning_reward_mode,
             "learning_potential": float(self._learning_potential),

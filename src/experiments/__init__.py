@@ -10,6 +10,10 @@ from .formal import (
 )
 from .pilot import PilotConfig, run_pilot
 from .plotting import plot_main_figures
+from .single_uav_diagnostics import (
+    SingleUAVDiagnosticsConfig,
+    plot_single_uav_diagnostics,
+)
 from .scenario_screening import ScenarioScreeningConfig, run_scenario_screening
 from .quality_feature_sensitivity_audit import (
     QualityFeatureSensitivityAuditConfig,
@@ -93,6 +97,8 @@ __all__ = [
     "summarize_preliminary",
     "validate_preliminary",
     "plot_main_figures",
+    "SingleUAVDiagnosticsConfig",
+    "plot_single_uav_diagnostics",
     "ScenarioScreeningConfig",
     "run_scenario_screening",
     "QualityFeatureSensitivityAuditConfig",

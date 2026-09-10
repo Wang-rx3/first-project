@@ -215,10 +215,14 @@ def _reward_series(
         collision_penalty = _mean(-_number(row.get("reward_collision"), 0.0) for row in rows)
         energy_penalty = _mean(-_number(row.get("reward_energy"), 0.0) for row in rows)
         team_reward = _mean(row.get("reward_total") for row in rows)
+        learning_reward = _mean(
+            row.get("learning_reward_total") for row in rows
+        )
         series.append(
             {
                 "timestamp": timestamp,
                 "mean_reward": team_reward,
+                "learning_reward": learning_reward,
                 "j_loc": j_loc,
                 "j_com": j - j_loc,
                 "joint_objective": j,
@@ -227,6 +231,15 @@ def _reward_series(
                 "energy_normalized": energy_penalty / max(float(parameters["lambda_energy"]), 1e-12),
                 "collision": _mean(row.get("collision") for row in rows),
                 "connectivity": _mean(row.get("reward_connectivity") for row in rows),
+                "localization_progress_score": _mean(
+                    row.get("localization_progress_score") for row in rows
+                ),
+                "goal_progress_score": _mean(
+                    row.get("goal_progress_score") for row in rows
+                ),
+                "goal_distance": _mean(
+                    row.get("current_goal_distance") for row in rows
+                ),
             }
         )
     return series

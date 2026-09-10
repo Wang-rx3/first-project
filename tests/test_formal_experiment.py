@@ -55,6 +55,10 @@ class FormalExperimentTests(unittest.TestCase):
             self.assertTrue(report["ok"], report)
             self.assertEqual(report["scales"].keys(), {"scale_3", "scale_5", "scale_7"})
             self.assertEqual(aggregate["scales"], [3, 5, 7])
+            scale_plot_contract = aggregate["figure_contract"]["communication_localization_metrics"]
+            self.assertEqual(scale_plot_contract["mode"], "test_scale_comparison")
+            self.assertEqual(scale_plot_contract["x_axis"], "uav_count")
+            self.assertEqual(scale_plot_contract["points"], 3)
             self.assertEqual(len(summaries), 3)
             for count in (3, 5, 7):
                 scale = root / f"scale_{count}"
@@ -84,11 +88,18 @@ class FormalExperimentTests(unittest.TestCase):
 
             for filename in (
                 "learning_curves.png",
+                "training_cumulative_reward.png",
+                "mappo_training_loss.png",
                 "scale_comparison.png",
                 "communication_localization_metrics.png",
             ):
                 self.assertTrue((root / "plots" / filename).exists())
                 self.assertGreater((root / "plots" / filename).stat().st_size, 0)
+
+            with (root / "logs" / "training_episodes.csv").open(encoding="utf-8") as handle:
+                training_episode_rows = list(csv.DictReader(handle))
+            self.assertEqual(len(training_episode_rows), 3)
+            self.assertIn("cumulative_return", training_episode_rows[0])
 
             training_metrics = [
                 json.loads(line)
@@ -129,7 +140,7 @@ class FormalExperimentTests(unittest.TestCase):
                     scenario_seed=2026,
                     max_steps=2,
                     warmup_episodes=1,
-                    train_episodes=1,
+                    train_episodes=2,
                     validation_episodes=1,
                     test_episodes=1,
                     device="cpu",
@@ -155,6 +166,17 @@ class FormalExperimentTests(unittest.TestCase):
                 self.assertTrue(
                     all(row["effective_edges_seen"] == "0" for row in csv.DictReader(handle))
                 )
+            aggregate = summarize_preliminary(
+                root,
+                logs_output=root / "logs",
+                plots_output=root / "plots",
+            )
+            trend_contract = aggregate["figure_contract"]["communication_localization_metrics"]
+            self.assertEqual(trend_contract["mode"], "single_scale_training_episode_trend")
+            self.assertEqual(trend_contract["source"], "diagnostics/episode_metrics.csv")
+            self.assertEqual(trend_contract["split"], "train")
+            self.assertEqual(trend_contract["x_axis"], "training_episode")
+            self.assertEqual(trend_contract["points"], 2)
 
 
 if __name__ == "__main__":

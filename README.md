@@ -2231,3 +2231,95 @@ plots/preliminary/single_uav_sanity_seed2026/
 和 2 个 test 回合；训练更新 5 次，`parameter_delta.delta_l2=0.1399812698`，schema 验证通过。
 相关代码测试为 `38 passed`。下一阶段应先在 2 架 UAV、单条可用链路的简单 LOS 场景中恢复协同
 通信，再回到 3 架 Moderate 场景；单机 sanity 的 validation/test 不用于反向调参。
+
+#### 单 UAV 通信/定位图的趋势横轴（2026-09-09）
+
+当汇总目录只包含一个 UAV scale 时，`communication_localization_metrics.png` 不再把
+`UAV count` 作为横轴，因为单个 scale 只能产生一个点。现在该图读取
+`diagnostics/episode_metrics.csv` 的 `train` split，横轴为 `Training episode`，每个点对应一个
+训练回合，不做跨回合平均；因此它是训练过程诊断图，不是独立 test 性能证据。包含多个 UAV
+scale 时仍保留原来的 `UAV count` 横轴和 test 回合均值比较。横轴模式和数据来源同步记录在
+`summary.json` 的 `figure_contract.communication_localization_metrics` 中。
+
+本次横轴修正后的验证输出位于：
+
+```text
+logs/preliminary/single_uav_sanity_seed2026_trend/
+plots/preliminary/single_uav_sanity_seed2026_trend/
+```
+
+#### 单 UAV episode 诊断图（2026-09-09）
+
+新增 `src/experiments/single_uav_diagnostics.py` 和 `plot-single-uav-diagnostics` 入口，直接读取
+一个已记录 episode 的 `trajectory.csv`、`ground_truth.csv`、`estimates.csv`、`rewards.csv` 和
+`obstacles.csv`，不重新运行仿真或修改策略。当前已对训练后 test episode `episode_500001` 生成：
+
+```text
+plots/preliminary/single_uav_sanity_seed2026/single_uav_diagnostics_test_episode_500001/
+```
+
+其中包括定位误差时间序列、XY/XYZ 飞行轨迹和 reward 时间序列；横轴均为仿真时间（s）。复现命令为：
+
+```text
+python main.py plot-single-uav-diagnostics data/synthetic/single_uav_sanity_seed2026/scale_1/test/episode_500001 --output plots/preliminary/single_uav_sanity_seed2026/single_uav_diagnostics_test_episode_500001
+```
+
+该图组是单回合、单种子的诊断结果，不支持收敛性、泛化性或协同通信性能结论；单 UAV 没有
+UAV-to-UAV 链路，packet loss、delay 和 AoI 不能解释为学习到的无人机间通信行为。
+
+#### 单 UAV 长回合训练与完整诊断（2026-09-09）
+
+在不改变 UAV 数量和场景几何的前提下，完成了固定 `scenario_seed=2026` 的长回合训练：1 架 UAV、
+100 步/回合（每回合最长 20 s）、10 个 warm-up、100 个训练回合、20 个 validation 回合和 20 个
+test 回合，MAPPO 更新 100 次。运行命令为：
+
+```text
+run-preliminary --output data/synthetic/single_uav_long_seed2026 --uav-counts 1 --seed 2026 --scenario-seed 2026 --steps 100 --warmup-episodes 10 --train-episodes 100 --validation-episodes 20 --test-episodes 20 --device cpu --force
+```
+
+结果和图表分别保存于：
+
+```text
+data/synthetic/single_uav_long_seed2026/
+logs/preliminary/single_uav_long_seed2026/
+plots/preliminary/single_uav_long_seed2026/
+```
+
+其中 `training_cumulative_reward.png` 使用每个训练回合的原始累计回报，`mappo_training_loss.png`
+使用每次 PPO update 的 total/actor/critic loss；test episode `episode_500001` 的
+`single_uav_diagnostics_test_episode_500001/` 包含完整 XY/XYZ 轨迹、定位误差时间序列和 reward
+时间序列。schema 验证通过，所有回合均记录 100 个时间步。
+
+本轮只是单 UAV 工程诊断：训练损失下降，但累计回报没有改善，test 轨迹也没有到达目标，因此不能
+据此宣称策略已经收敛或定位性能已经提升；单 UAV 的通信指标保持为无邻居链路下的占位诊断值。
+
+#### 单 UAV 定位优先基线与多 UAV 通信回归（2026-09-09）
+
+新增显式的 `single_uav_learning_mode`。默认值 `off` 保持旧实验兼容；本轮使用
+`loc_goal_v1`，将单 UAV 的 PPO 学习奖励与历史 `reporting_reward` 分离。学习奖励只使用 EKF
+位置协方差 log-det 的改善、EKF 估计目标距离的改善、能耗和碰撞项，其中定位进度权重为 `0.8`、
+目标进度权重为 `0.2`，并限制在 `[-1, 1]`。进度尺度仅由 warm-up 的相邻时间步拟合，并冻结到
+train/validation/test；packet loss、delay、AoI 等 UAV-to-UAV 指标继续记录，但在单 UAV 中标记为
+`communication_applicable=false`，不进入学习奖励。
+
+首轮实验使用固定 `scenario_seed=2026`、1 架 UAV、100 步/回合、10 个 warm-up、100 个训练回合、
+20 个 validation 回合和 20 个 test 回合，输出为：
+
+```text
+data/synthetic/single_uav_loc_goal_v1_seed2026/
+logs/preliminary/single_uav_loc_goal_v1_seed2026/
+plots/preliminary/single_uav_loc_goal_v1_seed2026/
+```
+
+本轮 schema 校验通过；训练日志包含 100 个 PPO update，actor gradient norm 100/100 为有限正值，
+actor loss 约为 `-0.1038` 至 `0.0313`，KL、entropy、clip fraction 均有记录。测试 episode
+`episode_500001` 生成 100 个时间步的 XY/XYZ 轨迹、定位误差、EKF 协方差、目标距离和奖励分解图。
+当前累计学习奖励和目标距离仍显示策略尚未收敛，因此该单种子结果仍是奖励设计与训练流程验证，
+不是最终性能结论。
+
+另完成 3 UAV 小规模回归：`communication_applicable=true`、18 条候选/有效链路记录、测量与带宽
+动作掩码恢复为多机形式，且通信奖励重新进入学习奖励。回归输出为：
+
+```text
+data/synthetic/three_uav_comm_regression_seed2026/
+```

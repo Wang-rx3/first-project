@@ -735,6 +735,28 @@ class _EpisodeTraceWriter:
                     "reward_total": _round(rewards[uav_id]),
                     "learning_reward_total": _round(learning_rewards[uav_id]),
                     "learning_reward_mode": info.get("learning_reward_mode", "legacy"),
+                    "single_uav_learning_mode": learning_components.get(
+                        "single_uav_learning_mode",
+                        info.get("single_uav_learning_mode", "off"),
+                    ),
+                    "single_uav_learning_active": int(
+                        bool(learning_components.get("single_uav_learning_active", False))
+                    ),
+                    "communication_applicable": int(
+                        bool(
+                            learning_components.get(
+                                "communication_applicable",
+                                info.get("communication_applicable", False),
+                            )
+                        )
+                    ),
+                    "communication_reward_in_learning": int(
+                        bool(
+                            learning_components.get(
+                                "communication_reward_in_learning", True
+                            )
+                        )
+                    ),
                     "learning_potential": _round(info.get("learning_potential", 0.0)),
                     "learning_progress_potential": _round(
                         info.get("learning_progress_potential", info.get("learning_potential", 0.0))
@@ -771,6 +793,56 @@ class _EpisodeTraceWriter:
                     ),
                     "loc_progress_reward": _round(
                         learning_components.get("loc_progress_reward", 0.0)
+                    ),
+                    "single_uav_localization_progress_delta": _round(
+                        learning_components.get(
+                            "single_uav_localization_progress_delta", 0.0
+                        )
+                    ),
+                    "single_uav_localization_progress_scale": _round(
+                        learning_components.get(
+                            "single_uav_localization_progress_scale", 0.0
+                        )
+                    ),
+                    "localization_progress_score": _round(
+                        learning_components.get("localization_progress_score", 0.0)
+                    ),
+                    "single_uav_localization_component": _round(
+                        learning_components.get(
+                            "single_uav_localization_component", 0.0
+                        )
+                    ),
+                    "previous_goal_distance": _round(
+                        learning_components.get("previous_goal_distance", 0.0)
+                    ),
+                    "current_goal_distance": _round(
+                        learning_components.get("current_goal_distance", 0.0)
+                    ),
+                    "goal_progress_delta": _round(
+                        learning_components.get("goal_progress_delta", 0.0)
+                    ),
+                    "goal_progress_scale": _round(
+                        learning_components.get("goal_progress_scale", 0.0)
+                    ),
+                    "goal_progress_score": _round(
+                        learning_components.get("goal_progress_score", 0.0)
+                    ),
+                    "single_uav_goal_component": _round(
+                        learning_components.get("single_uav_goal_component", 0.0)
+                    ),
+                    "single_uav_learning_energy_cost": _round(
+                        learning_components.get("single_uav_learning_energy_cost", 0.0)
+                    ),
+                    "single_uav_learning_collision_cost": _round(
+                        learning_components.get(
+                            "single_uav_learning_collision_cost", 0.0
+                        )
+                    ),
+                    "single_uav_learning_core": _round(
+                        learning_components.get("single_uav_learning_core", 0.0)
+                    ),
+                    "single_uav_learning_reward": _round(
+                        learning_components.get("single_uav_learning_reward", 0.0)
                     ),
                     "actual_measurement_count": int(
                         learning_components.get("actual_measurement_count", 0)

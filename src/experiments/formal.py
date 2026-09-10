@@ -203,6 +203,16 @@ class FormalExperimentConfig:
     )
     collision_penalty: float = 10.0
     energy_weight: float = 0.01
+    # Explicit single-UAV learning channel.  ``off`` preserves the historical
+    # PPO reward; ``loc_goal_v1`` is fitted from warm-up-only EKF deltas and is
+    # active only for the one-UAV scale.
+    single_uav_learning_mode: str = "off"
+    single_uav_learning_weights: Mapping[str, float] = field(
+        default_factory=lambda: {
+            "localization_progress": 0.8,
+            "goal_progress": 0.2,
+        }
+    )
     learning_reward_mode: str = "legacy"
     learning_reward_clip: float = 1.0
     learning_collision_penalty_cap: float = 1.0
@@ -367,6 +377,34 @@ class FormalExperimentConfig:
             raise ValueError("actor_learning_rate_scale must be finite and positive")
         if self.ppo_action_logprob_mode not in {"sampled", "executed"}:
             raise ValueError("ppo_action_logprob_mode must be sampled or executed")
+        if self.single_uav_learning_mode not in {"off", "loc_goal_v1"}:
+            raise ValueError(
+                "single_uav_learning_mode must be off or loc_goal_v1"
+            )
+        if not isinstance(self.single_uav_learning_weights, Mapping):
+            raise ValueError("single_uav_learning_weights must be a mapping")
+        expected_single_uav_weight_keys = {
+            "localization_progress",
+            "goal_progress",
+        }
+        if set(self.single_uav_learning_weights) != expected_single_uav_weight_keys:
+            raise ValueError(
+                "single_uav_learning_weights must contain exactly "
+                "localization_progress and goal_progress"
+            )
+        single_uav_weight_values = [
+            float(self.single_uav_learning_weights[key])
+            for key in sorted(expected_single_uav_weight_keys)
+        ]
+        if any(
+            not np.isfinite(value) or value < 0.0
+            for value in single_uav_weight_values
+        ):
+            raise ValueError(
+                "single_uav_learning_weights must contain finite non-negative values"
+            )
+        if not np.isclose(sum(single_uav_weight_values), 1.0, atol=1e-8):
+            raise ValueError("single_uav_learning_weights must sum to one")
         if self.learning_reward_mode not in {
             "legacy",
             "bounded_potential",
@@ -418,6 +456,19 @@ class FormalExperimentConfig:
                     self.potential_statistics["delta_u_scale"]
                 ) <= 0.0:
                     raise ValueError("potential_statistics[delta_u_scale] must be positive")
+            if self.single_uav_learning_mode == "loc_goal_v1":
+                for key in ("delta_u_scale", "delta_goal_scale"):
+                    if key not in self.potential_statistics:
+                        raise ValueError(
+                            "loc_goal_v1 requires "
+                            f"potential_statistics[{key}]"
+                        )
+                    if not np.isfinite(float(self.potential_statistics[key])) or float(
+                        self.potential_statistics[key]
+                    ) <= 0.0:
+                        raise ValueError(
+                            f"potential_statistics[{key}] must be positive"
+                        )
         for name, value in (
             ("collision_penalty", self.collision_penalty),
             ("energy_weight", self.energy_weight),
@@ -838,6 +889,8 @@ def _make_environment(
                 metric_scales=dict(metric_scales) if metric_scales is not None else None,
                 metric_scale_source=(config.metric_scale_source if metric_scales is not None else "default"),
                 uncertainty_normalization=str(config.uncertainty_normalization),
+                single_uav_learning_mode=str(config.single_uav_learning_mode),
+                single_uav_learning_weights=dict(config.single_uav_learning_weights),
                 learning_reward_mode=config.learning_reward_mode,
                 learning_reward_clip=float(config.learning_reward_clip),
                 learning_collision_penalty_cap=float(config.learning_collision_penalty_cap),
@@ -1181,6 +1234,40 @@ def _fit_adjacent_uncertainty_delta_statistics(
     }
 
 
+def _fit_adjacent_goal_distance_delta_statistics(
+    values: Sequence[float],
+) -> dict[str, Any]:
+    """Fit a warm-up-only robust scale for goal-distance progress."""
+
+    array = np.asarray(
+        [float(value) for value in values if np.isfinite(float(value))],
+        dtype=float,
+    )
+    if array.size == 0:
+        return {
+            "delta_goal_scale": 1e-3,
+            "delta_goal_median": 0.0,
+            "delta_goal_mad": 0.0,
+            "delta_goal_samples": 0,
+            "delta_goal_scale_floor_applied": True,
+            "delta_goal_scale_source": "warmup_adjacent_window_mad",
+            "delta_goal_definition": "goal_distance_previous_minus_current_same_episode",
+        }
+    median = float(np.median(array))
+    mad = float(np.median(np.abs(array - median)))
+    robust_scale = float(1.4826 * mad)
+    scale = max(robust_scale, 1e-3)
+    return {
+        "delta_goal_scale": float(scale),
+        "delta_goal_median": median,
+        "delta_goal_mad": mad,
+        "delta_goal_samples": int(array.size),
+        "delta_goal_scale_floor_applied": bool(robust_scale < 1e-3),
+        "delta_goal_scale_source": "warmup_adjacent_window_mad",
+        "delta_goal_definition": "goal_distance_previous_minus_current_same_episode",
+    }
+
+
 def _fit_accepted_update_feedback_statistics(
     values: Sequence[float],
 ) -> dict[str, Any]:
@@ -1254,6 +1341,7 @@ def _fit_normalizer(
     visual_odometry_rows: list[dict[str, Any]] = []
     potential_rows: list[dict[str, float]] = []
     adjacent_delta_u_values: list[float] = []
+    adjacent_delta_goal_values: list[float] = []
     accepted_update_feedback_values: list[float] = []
     transition_steps = 0
     for index in range(config.warmup_episodes):
@@ -1275,6 +1363,7 @@ def _fit_normalizer(
                 actual_measurement_cost_coef=0.0,
                 accepted_update_feedback_coef=0.0,
                 accepted_update_feedback_delay_steps=1,
+                single_uav_learning_mode="off",
                 uncertainty_normalization=(
                     "p95"
                     if config.uncertainty_normalization == "warmup_q05_q95"
@@ -1287,6 +1376,7 @@ def _fit_normalizer(
                 "accepted_update_progress_v1",
                 "accepted_update_progress_v2",
             }
+            or config.single_uav_learning_mode == "loc_goal_v1"
             or (
                 config.uncertainty_normalization == "warmup_q05_q95"
                 and config.metric_scales is None
@@ -1306,6 +1396,7 @@ def _fit_normalizer(
         episode_u_values = [
             _position_logdet_from_central_state(info.get("central_state"))
         ]
+        episode_goal_distance_values = [environment.estimated_goal_distance()]
         central_vectors.append(
             central_state_to_vector(
                 info.get("central_state"),
@@ -1331,6 +1422,7 @@ def _fit_normalizer(
                 next_info.get("central_state")
             )
             episode_u_values.append(current_u)
+            episode_goal_distance_values.append(environment.estimated_goal_distance())
             objective_components = next_info.get("objective_components", {})
             if isinstance(objective_components, Mapping):
                 potential_rows.append(
@@ -1371,9 +1463,15 @@ def _fit_normalizer(
             observations = next_observations
             if terminated or truncated:
                 break
-        if config.learning_feedback_mode == "loc_progress_v2":
+        if config.learning_feedback_mode == "loc_progress_v2" or (
+            config.single_uav_learning_mode == "loc_goal_v1"
+        ):
             adjacent_delta_u_values.extend(
                 _within_episode_uncertainty_deltas(episode_u_values)
+            )
+        if config.single_uav_learning_mode == "loc_goal_v1":
+            adjacent_delta_goal_values.extend(
+                _within_episode_uncertainty_deltas(episode_goal_distance_values)
             )
         _progress(
             config,
@@ -1440,6 +1538,28 @@ def _fit_normalizer(
             potential_statistics.update(
                 _fit_adjacent_uncertainty_delta_statistics(adjacent_delta_u_values)
             )
+    if config.single_uav_learning_mode == "loc_goal_v1":
+        if config.potential_statistics is not None:
+            potential_statistics = copy.deepcopy(dict(potential_statistics))
+            for key in ("delta_u_scale", "delta_goal_scale"):
+                if key not in potential_statistics:
+                    raise RuntimeError(
+                        "loc_goal_v1 frozen statistics are missing "
+                        f"{key}"
+                    )
+        else:
+            potential_statistics = dict(potential_statistics)
+            if "delta_u_scale" not in potential_statistics:
+                potential_statistics.update(
+                    _fit_adjacent_uncertainty_delta_statistics(
+                        adjacent_delta_u_values
+                    )
+                )
+            potential_statistics.update(
+                _fit_adjacent_goal_distance_delta_statistics(
+                    adjacent_delta_goal_values
+                )
+            )
     accepted_feedback_statistics = _fit_accepted_update_feedback_statistics(
         accepted_update_feedback_values
     )
@@ -1460,8 +1580,14 @@ def _fit_normalizer(
         "potential_statistics": potential_statistics,
         "potential_statistics_rows": int(len(potential_rows)),
         "adjacent_delta_u_rows": int(len(adjacent_delta_u_values)),
+        "adjacent_delta_goal_rows": int(len(adjacent_delta_goal_values)),
         "adjacent_delta_u_scale_source": (
             str(potential_statistics.get("delta_u_scale_source"))
+            if isinstance(potential_statistics, Mapping)
+            else None
+        ),
+        "adjacent_delta_goal_scale_source": (
+            str(potential_statistics.get("delta_goal_scale_source"))
             if isinstance(potential_statistics, Mapping)
             else None
         ),
@@ -1499,6 +1625,7 @@ def fit_shared_training_metric_scales(
                 actual_measurement_cost_enabled=False,
                 actual_measurement_cost_target=None,
                 actual_measurement_cost_coef=0.0,
+                single_uav_learning_mode="off",
                 uncertainty_normalization=(
                     "p95"
                     if config.uncertainty_normalization == "warmup_q05_q95"
@@ -1506,6 +1633,7 @@ def fit_shared_training_metric_scales(
                 ),
             )
             if config.learning_feedback_mode == "loc_progress_v2"
+            or config.single_uav_learning_mode == "loc_goal_v1"
             or config.uncertainty_normalization == "warmup_q05_q95"
             else config
         )
@@ -1718,10 +1846,20 @@ def _episode_metrics(episode_path: Path, episode_summary: Mapping[str, Any]) -> 
     if not np.isfinite(position_p95_norm):
         position_p95_norm = 0.0
     reward_values = [_number(row, "reward_total") for row in rewards]
+    learning_reward_values = [
+        _number(row, "learning_reward_total") for row in rewards
+    ]
     reward_mean = _finite_mean(reward_values)
     episode_return = float(sum(value for value in reward_values if np.isfinite(value)) / max(1, uav_count))
+    learning_reward_mean = _finite_mean(learning_reward_values)
+    learning_episode_return = float(
+        sum(value for value in learning_reward_values if np.isfinite(value))
+        / max(1, uav_count)
+    )
     scenario = json.loads((episode_path / "scenario.json").read_text(encoding="utf-8"))
     reward_weights = dict(scenario.get("reward_config", {}).get("weights", {}))
+    reward_config = scenario.get("reward_config", {})
+    reward_config = reward_config if isinstance(reward_config, Mapping) else {}
     uncertainty_weight = float(
         reward_weights.get("uncertainty", reward_weights.get("unc", 0.35))
     )
@@ -1750,6 +1888,29 @@ def _episode_metrics(episode_path: Path, episode_summary: Mapping[str, Any]) -> 
         "uav_count": uav_count,
         "mean_reward": reward_mean,
         "episode_return": episode_return,
+        "mean_learning_reward": learning_reward_mean,
+        "learning_reward_total": float(
+            episode_summary.get("learning_reward_total", learning_episode_return)
+        ),
+        "reporting_reward_total": float(
+            episode_summary.get("reporting_reward_total", episode_return)
+        ),
+        "communication_applicable": bool(uav_count > 1),
+        "single_uav_learning_mode": str(
+            reward_config.get("single_uav_learning_mode", "off")
+        ),
+        "localization_progress_score": _finite_mean(
+            _number(row, "localization_progress_score") for row in rewards
+        ),
+        "goal_progress_score": _finite_mean(
+            _number(row, "goal_progress_score") for row in rewards
+        ),
+        "goal_distance_initial": _finite_mean(
+            _number(row, "previous_goal_distance") for row in rewards[:1]
+        ),
+        "goal_distance_final": _finite_mean(
+            _number(row, "current_goal_distance") for row in rewards[-1:]
+        ),
         # ``episode_return`` is intentionally retained as the per-episode
         # diagnostic used by the existing schema.  This companion field
         # removes the confounding effect of variable early termination when
@@ -1827,7 +1988,16 @@ def _write_episode_metrics(path: Path, rows: Sequence[Mapping[str, Any]]) -> Non
         "uav_count",
         "mean_reward",
         "episode_return",
+        "mean_learning_reward",
+        "learning_reward_total",
+        "reporting_reward_total",
         "return_per_window",
+        "communication_applicable",
+        "single_uav_learning_mode",
+        "localization_progress_score",
+        "goal_progress_score",
+        "goal_distance_initial",
+        "goal_distance_final",
         "j_loc",
         "j_com",
         "joint_objective",
@@ -1989,6 +2159,28 @@ def _write_scale_manifest(
             else "shared_policy_mappo"
         ),
         "cooperative_links_expected": bool(config.uav_count > 1),
+        "communication_applicable": bool(config.uav_count > 1),
+        "single_uav_learning_mode": str(config.single_uav_learning_mode),
+        "single_uav_learning_active": bool(
+            config.uav_count == 1
+            and config.single_uav_learning_mode == "loc_goal_v1"
+        ),
+        "single_uav_learning_weights": {
+            str(key): float(value)
+            for key, value in config.single_uav_learning_weights.items()
+        },
+        "learning_reward_contract": {
+            "reporting_reward_preserved": True,
+            "single_uav_communication_reward_included": bool(
+                config.uav_count > 1
+            ),
+            "single_uav_progress_scales": (
+                "warmup_only_adjacent_EKF_logdet_and_estimated_goal_distance_deltas"
+                if config.uav_count == 1
+                and config.single_uav_learning_mode == "loc_goal_v1"
+                else "not_applicable"
+            ),
+        },
         "scenario_mode": (
             "fixed_generated_geometry_seed"
             if config.scenario_seed is not None
@@ -2069,6 +2261,13 @@ def _write_scale_manifest(
                 "there are no inter-UAV communication or cooperative-localization edges."
                 if config.uav_count == 1
                 else "The multi-UAV run contains inter-UAV communication and cooperative-localization edges."
+            ),
+            (
+                "loc_goal_v1 uses a separate EKF-estimated localization/goal-progress learning reward; "
+                "reporting_reward remains unchanged and single-UAV communication metrics are diagnostic only."
+                if config.uav_count == 1
+                and config.single_uav_learning_mode == "loc_goal_v1"
+                else "The single-UAV localization-first learning channel is disabled; historical learning reward is retained."
             ),
             (
                 "Generated scene geometry is fixed by scenario_seed; transition and sensor randomness "
@@ -2175,6 +2374,7 @@ def _run_episode(
     )
     rewards_history: list[float] = []
     learning_rewards_history: list[float] = []
+    learning_component_history: list[dict[str, Any]] = []
     inference_times: list[float] = []
     attention_rows: list[dict[str, Any]] = []
     effective_edges_seen = 0
@@ -2433,6 +2633,9 @@ def _run_episode(
             float(value)
             for value in next_info.get("learning_rewards", rewards).values()
         )
+        learning_components = next_info.get("learning_reward_components", {})
+        if isinstance(learning_components, Mapping):
+            learning_component_history.append(dict(learning_components))
         effective_edges_seen += len(next_info["central_state"]["effective_edges"])
         max_neighbor_updates = max(
             max_neighbor_updates,
@@ -2486,6 +2689,38 @@ def _run_episode(
                 if learning_rewards_history
                 else 0.0
             ),
+            # Explicit aliases make the two reward channels easy to consume
+            # without changing the historical cumulative-return fields.
+            "reporting_reward_total": (
+                float(np.sum(rewards_history) / max(1, config.uav_count))
+                if rewards_history
+                else 0.0
+            ),
+            "learning_reward_total": (
+                float(np.sum(learning_rewards_history) / max(1, config.uav_count))
+                if learning_rewards_history
+                else 0.0
+            ),
+            "communication_applicable": bool(config.uav_count > 1),
+            "single_uav_learning_mode": str(config.single_uav_learning_mode),
+            "localization_progress_score": _finite_mean(
+                float(row.get("localization_progress_score", 0.0))
+                for row in learning_component_history
+            ),
+            "goal_progress_score": _finite_mean(
+                float(row.get("goal_progress_score", 0.0))
+                for row in learning_component_history
+            ),
+            "goal_distance_initial": (
+                float(learning_component_history[0].get("previous_goal_distance", 0.0))
+                if learning_component_history
+                else 0.0
+            ),
+            "goal_distance_final": (
+                float(learning_component_history[-1].get("current_goal_distance", 0.0))
+                if learning_component_history
+                else 0.0
+            ),
             "effective_edges_seen": effective_edges_seen,
             "max_neighbor_updates": max_neighbor_updates,
             "collision_occurred": episode_summary.get("collision_occurred", False),
@@ -2532,6 +2767,26 @@ def _run_episode(
                 "mean_reward": sum(b["windows"] * b["mean_reward"] for b in batch) / sum(b["windows"] for b in batch),
                 "learning_reward": sum(b["windows"] * b["mean_learning_reward"] for b in batch) / sum(b["windows"] for b in batch),
                 "mean_learning_reward": sum(b["windows"] * b["mean_learning_reward"] for b in batch) / sum(b["windows"] for b in batch),
+                "learning_reward_total": episode_summary.get(
+                    "learning_reward_total", episode_summary.get("learning_cumulative_return", 0.0)
+                ),
+                "reporting_reward_total": episode_summary.get(
+                    "reporting_reward_total", episode_summary.get("cumulative_return", 0.0)
+                ),
+                "communication_applicable": bool(config.uav_count > 1),
+                "single_uav_learning_mode": str(config.single_uav_learning_mode),
+                "localization_progress_score": episode_summary.get(
+                    "localization_progress_score", 0.0
+                ),
+                "goal_progress_score": episode_summary.get(
+                    "goal_progress_score", 0.0
+                ),
+                "goal_distance_initial": episode_summary.get(
+                    "goal_distance_initial", 0.0
+                ),
+                "goal_distance_final": episode_summary.get(
+                    "goal_distance_final", 0.0
+                ),
                 "episode_ids": [b["episode_id"] for b in batch],
                 "rollout_episode_count": len(batch),
                 "rollout_window_count": sum(b["windows"] for b in batch),
@@ -2615,6 +2870,7 @@ def run_preliminary(
     needs_potential_statistics = (
         config.learning_reward_mode == "progress_potential_v2"
         or config.learning_feedback_mode == "loc_progress_v2"
+        or config.single_uav_learning_mode == "loc_goal_v1"
     )
     if needs_potential_statistics:
         if not isinstance(potential_statistics, Mapping):
@@ -2665,14 +2921,25 @@ def run_preliminary(
                 raise RuntimeError(
                     "frozen normalization is missing required potential statistics"
                 )
-            if config.learning_feedback_mode == "loc_progress_v2" and (
-                "delta_u_scale" not in frozen_potential_statistics
-                or not np.isfinite(float(frozen_potential_statistics["delta_u_scale"]))
-                or float(frozen_potential_statistics["delta_u_scale"]) <= 0.0
-            ):
-                raise RuntimeError(
-                    "frozen normalization is missing a finite positive delta_u_scale"
+            required_frozen_delta_scales = []
+            if config.learning_feedback_mode == "loc_progress_v2":
+                required_frozen_delta_scales.append("delta_u_scale")
+            if config.single_uav_learning_mode == "loc_goal_v1":
+                required_frozen_delta_scales.extend(
+                    ["delta_u_scale", "delta_goal_scale"]
                 )
+            for required_scale in dict.fromkeys(required_frozen_delta_scales):
+                if (
+                    required_scale not in frozen_potential_statistics
+                    or not np.isfinite(
+                        float(frozen_potential_statistics[required_scale])
+                    )
+                    or float(frozen_potential_statistics[required_scale]) <= 0.0
+                ):
+                    raise RuntimeError(
+                        "frozen normalization is missing a finite positive "
+                        f"{required_scale}"
+                    )
             config = replace(
                 config,
                 potential_statistics=copy.deepcopy(dict(frozen_potential_statistics)),
@@ -2989,6 +3256,16 @@ def run_preliminary(
             else "shared_policy_mappo"
         ),
         "cooperative_links_expected": bool(config.uav_count > 1),
+        "communication_applicable": bool(config.uav_count > 1),
+        "single_uav_learning_mode": str(config.single_uav_learning_mode),
+        "single_uav_learning_active": bool(
+            config.uav_count == 1
+            and config.single_uav_learning_mode == "loc_goal_v1"
+        ),
+        "single_uav_learning_weights": {
+            str(key): float(value)
+            for key, value in config.single_uav_learning_weights.items()
+        },
         "scenario_mode": (
             "fixed_generated_geometry_seed"
             if config.scenario_seed is not None
@@ -3260,13 +3537,140 @@ def _scale_directories(root: Path) -> list[Path]:
     )
 
 
+def _plot_training_cumulative_reward(
+    training_episode_rows: Sequence[Mapping[str, Any]],
+    path: Path,
+) -> None:
+    """Plot the recorded per-training-episode cumulative rewards.
+
+    ``training_episodes.jsonl`` is the source because it preserves the raw
+    episode return before the update-level aggregation used by
+    ``training_metrics.jsonl``.  No smoothing or cross-episode averaging is
+    applied here.
+    """
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    colors = {1: "#7c3aed", 3: "#2563eb", 5: "#16a34a", 7: "#dc2626"}
+    figure, axis = plt.subplots(figsize=(10, 5.5), constrained_layout=True)
+    scales = sorted({int(_number(row, "uav_count", 0.0)) for row in training_episode_rows})
+    for count in scales:
+        selected = [
+            row
+            for row in training_episode_rows
+            if int(_number(row, "uav_count", 0.0)) == count
+        ]
+        selected.sort(key=lambda row: int(_number(row, "training_episode", 0.0)))
+        x = [
+            int(_number(row, "training_episode", index + 1))
+            for index, row in enumerate(selected)
+        ]
+        color = colors.get(count, "#7c3aed")
+        axis.plot(
+            x,
+            [_number(row, "cumulative_return", 0.0) for row in selected],
+            color=color,
+            linewidth=1.8,
+            marker="o",
+            markersize=3,
+            label=f"{count} UAV report return",
+        )
+        if any("learning_cumulative_return" in row for row in selected):
+            axis.plot(
+                x,
+                [_number(row, "learning_cumulative_return", 0.0) for row in selected],
+                color=color,
+                linewidth=1.3,
+                linestyle="--",
+                marker=".",
+                markersize=4,
+                label=f"{count} UAV learning return",
+            )
+    axis.set_title("Training cumulative reward")
+    axis.set_xlabel("Training episode")
+    axis.set_ylabel("Cumulative reward per episode")
+    axis.grid(alpha=0.25)
+    if scales:
+        axis.legend()
+    figure.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close(figure)
+
+
+def _plot_mappo_training_loss(
+    training_rows: Sequence[Mapping[str, Any]],
+    path: Path,
+) -> None:
+    """Plot total, actor, and critic loss from each MAPPO update."""
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    colors = {1: "#7c3aed", 3: "#2563eb", 5: "#16a34a", 7: "#dc2626"}
+    figure, axis = plt.subplots(figsize=(10, 5.5), constrained_layout=True)
+    actor_axis = axis.twinx()
+    scales = sorted({int(_number(row, "uav_count", 0.0)) for row in training_rows})
+    styles = (("loss", "total loss", "-"), ("critic_loss", "critic loss", ":"))
+    for count in scales:
+        selected = [
+            row
+            for row in training_rows
+            if int(_number(row, "uav_count", 0.0)) == count
+        ]
+        selected.sort(key=lambda row: int(_number(row, "update", 0.0)))
+        x = [
+            int(_number(row, "update", index + 1))
+            for index, row in enumerate(selected)
+        ]
+        color = colors.get(count, "#7c3aed")
+        for metric, label, linestyle in styles:
+            axis.plot(
+                x,
+                [_number(row, metric, 0.0) for row in selected],
+                color=color,
+                linewidth=1.6,
+                linestyle=linestyle,
+                marker="o" if metric == "loss" else None,
+                markersize=3,
+                label=f"{count} UAV {label}",
+            )
+        actor_axis.plot(
+            x,
+            [_number(row, "actor_loss", 0.0) for row in selected],
+            color=color,
+            linewidth=1.6,
+            linestyle="--",
+            label=f"{count} UAV actor loss",
+        )
+    axis.set_title("MAPPO training loss")
+    axis.set_xlabel("PPO update")
+    axis.set_ylabel("Total / critic loss")
+    actor_axis.set_ylabel("Actor loss")
+    axis.grid(alpha=0.25)
+    if scales:
+        left_handles, left_labels = axis.get_legend_handles_labels()
+        right_handles, right_labels = actor_axis.get_legend_handles_labels()
+        axis.legend(
+            left_handles + right_handles,
+            left_labels + right_labels,
+            ncol=2,
+            loc="upper right",
+        )
+    figure.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close(figure)
+
+
 def summarize_preliminary(
     output_dir: str | Path,
     *,
     logs_output: str | Path | None = None,
     plots_output: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Aggregate scale metrics and create reproducible PNG plots."""
+    """Aggregate metrics and create reproducible scale or training-trend PNG plots."""
 
     root = Path(output_dir)
     scale_dirs = _scale_directories(root)
@@ -3281,11 +3685,18 @@ def summarize_preliminary(
     plot_root.mkdir(parents=True, exist_ok=True)
 
     episode_rows: list[dict[str, Any]] = []
+    training_episode_rows: list[dict[str, Any]] = []
     training_rows: list[dict[str, Any]] = []
     for scale_dir in scale_dirs:
         metrics_path = scale_dir / "diagnostics" / "episode_metrics.csv"
         if metrics_path.exists():
             episode_rows.extend(_read_csv(metrics_path))
+        training_episode_path = scale_dir / "diagnostics" / "training_episodes.jsonl"
+        if training_episode_path.exists():
+            with training_episode_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.strip():
+                        training_episode_rows.append(json.loads(line))
         training_path = scale_dir / "diagnostics" / "training_metrics.jsonl"
         if training_path.exists():
             with training_path.open("r", encoding="utf-8") as handle:
@@ -3293,6 +3704,14 @@ def summarize_preliminary(
                     if line.strip():
                         training_rows.append(json.loads(line))
     _write_episode_metrics(log_root / "episode_metrics.csv", episode_rows)
+    training_episode_columns = sorted(
+        {key for row in training_episode_rows for key in row}
+    )
+    _write_csv(
+        log_root / "training_episodes.csv",
+        training_episode_columns,
+        training_episode_rows,
+    )
     training_columns = sorted({key for row in training_rows for key in row})
     _write_csv(log_root / "training_metrics.csv", training_columns, training_rows)
 
@@ -3349,6 +3768,15 @@ def summarize_preliminary(
     figure.savefig(plot_root / "learning_curves.png", dpi=180)
     plt.close(figure)
 
+    _plot_training_cumulative_reward(
+        training_episode_rows,
+        plot_root / "training_cumulative_reward.png",
+    )
+    _plot_mappo_training_loss(
+        training_rows,
+        plot_root / "mappo_training_loss.png",
+    )
+
     metric_names = ["mean_reward", "position_rmse_m", "packet_loss", "connectivity"]
     figure, axes = plt.subplots(2, 2, figsize=(10, 7), constrained_layout=True)
     for axis, metric in zip(axes.flat, metric_names):
@@ -3361,31 +3789,156 @@ def summarize_preliminary(
     figure.savefig(plot_root / "scale_comparison.png", dpi=180)
     plt.close(figure)
 
+    communication_metric_names = ["packet_loss", "delay_s", "aoi_s", "position_rmse_m"]
+    communication_plot_mode = "test_scale_comparison"
+    communication_plot_source = "scale_summary.csv"
+    communication_plot_split = "test"
+    communication_plot_x_axis = "uav_count"
+    communication_plot_x_label = "UAV count"
+    communication_plot_aggregation = "mean over test episodes for each UAV scale"
+    communication_plot_rows: list[Mapping[str, Any]] = scale_summary
+    communication_plot_x_values: list[int] = [int(row["uav_count"]) for row in scale_summary]
+
+    # A single scale cannot form a meaningful cross-scale line.  For the
+    # single-UAV workflow, expose the per-training-episode diagnostics instead.
+    # The train split is intentionally used here: this is a learning-trend
+    # diagnostic, not a replacement for the held-out test summary above.
+    if len(scale_dirs) == 1:
+        single_scale = int(scale_dirs[0].name[6:])
+        training_trend_rows = sorted(
+            [
+                row
+                for row in episode_rows
+                if str(row.get("split", "")) == "train"
+                and str(row.get("uav_count", "")) == str(single_scale)
+            ],
+            key=lambda row: str(row.get("episode_id", "")),
+        )
+        if training_trend_rows:
+            communication_plot_mode = "single_scale_training_episode_trend"
+            communication_plot_source = "diagnostics/episode_metrics.csv"
+            communication_plot_split = "train"
+            communication_plot_x_axis = "training_episode"
+            communication_plot_x_label = "Training episode"
+            communication_plot_aggregation = (
+                "one row per training episode; no cross-episode averaging"
+            )
+            communication_plot_rows = training_trend_rows
+            communication_plot_x_values = list(range(1, len(training_trend_rows) + 1))
+
     figure, axes = plt.subplots(2, 2, figsize=(10, 7), constrained_layout=True)
-    for axis, metric in zip(axes.flat, ["packet_loss", "delay_s", "aoi_s", "position_rmse_m"]):
-        values = [float(row.get(metric, 0.0)) for row in scale_summary]
-        labels = [str(row["uav_count"]) for row in scale_summary]
-        axis.plot(labels, values, marker="o", color="#7c3aed")
+    for axis, metric in zip(axes.flat, communication_metric_names):
+        values = [_number(row, metric) for row in communication_plot_rows]
+        axis.plot(
+            communication_plot_x_values,
+            values,
+            marker="o",
+            linewidth=1.8,
+            color="#7c3aed",
+        )
         axis.set_title(metric)
-        axis.set_xlabel("UAV count")
+        axis.set_xlabel(communication_plot_x_label)
         axis.grid(alpha=0.25)
     figure.savefig(plot_root / "communication_localization_metrics.png", dpi=180)
     plt.close(figure)
+
+    single_uav_diagnostics: dict[str, Any] | None = None
+    if len(scale_dirs) == 1 and int(scale_dirs[0].name[6:]) == 1:
+        test_episode_paths = sorted(
+            path
+            for path in (scale_dirs[0] / "test").glob("episode_*")
+            if path.is_dir()
+        )
+        if test_episode_paths:
+            required_diagnostic_files = (
+                "scenario.json",
+                "trajectory.csv",
+                "ground_truth.csv",
+                "estimates.csv",
+                "rewards.csv",
+                "obstacles.csv",
+            )
+            selected_episode = test_episode_paths[0]
+            if all((selected_episode / name).is_file() for name in required_diagnostic_files):
+                from .single_uav_diagnostics import (
+                    SingleUAVDiagnosticsConfig,
+                    plot_single_uav_diagnostics,
+                )
+
+                single_uav_diagnostics = plot_single_uav_diagnostics(
+                    SingleUAVDiagnosticsConfig(
+                        episode_path=selected_episode,
+                        output_dir=plot_root / f"single_uav_diagnostics_{selected_episode.name}",
+                        force=True,
+                    )
+                )
+
+    plot_paths: dict[str, Any] = {
+        "learning_curves": str(plot_root / "learning_curves.png"),
+        "training_cumulative_reward": str(
+            plot_root / "training_cumulative_reward.png"
+        ),
+        "mappo_training_loss": str(plot_root / "mappo_training_loss.png"),
+        "scale_comparison": str(plot_root / "scale_comparison.png"),
+        "communication_localization_metrics": str(
+            plot_root / "communication_localization_metrics.png"
+        ),
+    }
+    if single_uav_diagnostics is not None:
+        plot_paths["single_uav_diagnostics"] = single_uav_diagnostics
 
     summary = {
         "output_dir": str(root),
         "scales": [int(path.name[6:]) for path in scale_dirs],
         "episode_rows": len(episode_rows),
+        "training_episode_rows": len(training_episode_rows),
         "training_rows": len(training_rows),
         "logs": {
             "episode_metrics": str(log_root / "episode_metrics.csv"),
+            "training_episodes": str(log_root / "training_episodes.csv"),
             "training_metrics": str(log_root / "training_metrics.csv"),
             "scale_summary": str(log_root / "scale_summary.csv"),
         },
-        "plots": {
-            "learning_curves": str(plot_root / "learning_curves.png"),
-            "scale_comparison": str(plot_root / "scale_comparison.png"),
-            "communication_localization_metrics": str(plot_root / "communication_localization_metrics.png"),
+        "plots": plot_paths,
+        "figure_contract": {
+            "training_cumulative_reward": {
+                "source": "diagnostics/training_episodes.jsonl",
+                "split": "train",
+                "x_axis": "training_episode",
+                "points": len(training_episode_rows),
+                "aggregation": "one row per training episode; no smoothing or cross-episode averaging",
+                "denominator": "uav_count; for the single-UAV run this is one",
+                "claim_boundary": "training-process diagnostic; not held-out test evidence",
+            },
+            "mappo_training_loss": {
+                "source": "diagnostics/training_metrics.jsonl",
+                "split": "train",
+                "x_axis": "ppo_update",
+                "points": len(training_rows),
+                "series": ["loss", "critic_loss", "actor_loss"],
+                "y_axes": {
+                    "left": ["loss", "critic_loss"],
+                    "right": ["actor_loss"],
+                },
+                "raw": True,
+                "smoothing": "none",
+                "aggregation": "one row per PPO update; values are the trainer-reported update means",
+                "claim_boundary": "optimization diagnostic; loss decrease alone does not establish policy improvement",
+            },
+            "communication_localization_metrics": {
+                "mode": communication_plot_mode,
+                "source": communication_plot_source,
+                "split": communication_plot_split,
+                "x_axis": communication_plot_x_axis,
+                "x_label": communication_plot_x_label,
+                "points": len(communication_plot_rows),
+                "aggregation": communication_plot_aggregation,
+                "claim_boundary": (
+                    "single-scale training diagnostic; not held-out test evidence"
+                    if communication_plot_mode == "single_scale_training_episode_trend"
+                    else "test aggregate comparison across UAV scales"
+                ),
+            }
         },
         "result_status": (
             "engineering_single_uav_sanity_only"

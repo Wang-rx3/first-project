@@ -155,6 +155,15 @@ def _build_parser() -> argparse.ArgumentParser:
     preliminary_parser.add_argument("--entropy-coef", type=float, default=0.005)
     preliminary_parser.add_argument("--initial-delta-std", type=float, default=0.20)
     preliminary_parser.add_argument(
+        "--single-uav-learning-mode",
+        choices=("off", "loc_goal_v1"),
+        default="off",
+        help=(
+            "single-UAV PPO reward channel; loc_goal_v1 uses warm-up-fitted "
+            "EKF localization and goal-progress signals"
+        ),
+    )
+    preliminary_parser.add_argument(
         "--ekf-config",
         type=Path,
         default=None,
@@ -2616,7 +2625,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     preliminary_summary_parser = subparsers.add_parser(
         "summarize-preliminary",
-        help="aggregate preliminary scale metrics and create PNG plots",
+        help="aggregate preliminary metrics and create scale or training-trend PNG plots",
     )
     preliminary_summary_parser.add_argument("path", type=Path)
     preliminary_summary_parser.add_argument("--logs-output", type=Path, default=None)
@@ -2638,6 +2647,27 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-test",
         action="store_true",
         help="omit test records from the figures",
+    )
+
+    single_uav_diagnostics_parser = subparsers.add_parser(
+        "plot-single-uav-diagnostics",
+        help="create time-series and XY/XYZ diagnostic plots for one recorded single-UAV episode",
+    )
+    single_uav_diagnostics_parser.add_argument(
+        "episode",
+        type=Path,
+        help="episode directory containing scenario.json/trajectory.csv and canonical episode files",
+    )
+    single_uav_diagnostics_parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="diagnostic PNG output directory; defaults beside the experiment plots",
+    )
+    single_uav_diagnostics_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="allow writing into a non-empty diagnostic output directory",
     )
 
     preliminary_validate_parser = subparsers.add_parser(
@@ -2981,6 +3011,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             learning_rate=args.learning_rate,
             entropy_coef=args.entropy_coef,
             initial_delta_std=args.initial_delta_std,
+            single_uav_learning_mode=args.single_uav_learning_mode,
             vo_position_std_m=ekf_parameters["vo_position_std_m"],
             process_position_std_m=ekf_parameters["process_position_std_m"],
             process_velocity_std_mps=ekf_parameters["process_velocity_std_mps"],
@@ -4358,6 +4389,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             logs_output=args.logs_output,
             include_validation=not args.no_validation,
             include_test=not args.no_test,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "plot-single-uav-diagnostics":
+        from .experiments.single_uav_diagnostics import (
+            SingleUAVDiagnosticsConfig,
+            plot_single_uav_diagnostics,
+        )
+
+        episode_path = Path(args.episode)
+        output_dir = args.output
+        if output_dir is None:
+            experiment_root = episode_path.parent.parent.parent
+            output_dir = (
+                Path("plots/preliminary")
+                / experiment_root.name
+                / f"single_uav_diagnostics_{episode_path.name}"
+            )
+        summary = plot_single_uav_diagnostics(
+            SingleUAVDiagnosticsConfig(
+                episode_path=episode_path,
+                output_dir=output_dir,
+                force=args.force,
+            )
         )
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return 0
