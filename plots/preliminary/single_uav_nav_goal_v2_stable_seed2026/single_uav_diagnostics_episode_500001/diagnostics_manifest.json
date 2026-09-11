@@ -1,0 +1,57 @@
+{
+  "figure_type": "single_uav_episode_diagnostics",
+  "config": {
+    "episode_path": "data\\synthetic\\single_uav_nav_goal_v2_stable_seed2026\\scale_1\\test\\episode_500001",
+    "output_dir": "plots\\preliminary\\single_uav_nav_goal_v2_stable_seed2026\\single_uav_diagnostics_episode_500001",
+    "force": true
+  },
+  "episode": {
+    "path": "D:\\research project\\data\\synthetic\\single_uav_nav_goal_v2_stable_seed2026\\scale_1\\test\\episode_500001",
+    "episode_id": "episode_500001",
+    "split": "test",
+    "uav_count": 1,
+    "uav_id": "uav_00",
+    "episode_seed": 1102026,
+    "scenario_geometry_seed": 2026,
+    "sample_count": 100,
+    "localization_points": 100,
+    "reward_points": 100,
+    "time_start_s": 0.2,
+    "time_end_s": 20.0
+  },
+  "source_files": {
+    "scenario.json": "D:\\research project\\data\\synthetic\\single_uav_nav_goal_v2_stable_seed2026\\scale_1\\test\\episode_500001\\scenario.json",
+    "trajectory.csv": "D:\\research project\\data\\synthetic\\single_uav_nav_goal_v2_stable_seed2026\\scale_1\\test\\episode_500001\\trajectory.csv",
+    "ground_truth.csv": "D:\\research project\\data\\synthetic\\single_uav_nav_goal_v2_stable_seed2026\\scale_1\\test\\episode_500001\\ground_truth.csv",
+    "estimates.csv": "D:\\research project\\data\\synthetic\\single_uav_nav_goal_v2_stable_seed2026\\scale_1\\test\\episode_500001\\estimates.csv",
+    "rewards.csv": "D:\\research project\\data\\synthetic\\single_uav_nav_goal_v2_stable_seed2026\\scale_1\\test\\episode_500001\\rewards.csv",
+    "obstacles.csv": "D:\\research project\\data\\synthetic\\single_uav_nav_goal_v2_stable_seed2026\\scale_1\\test\\episode_500001\\obstacles.csv"
+  },
+  "x_axes": {
+    "localization_error_timeseries": "simulation_time_s",
+    "goal_distance_timeseries": "simulation_time_s",
+    "flight_trajectory_xy_xyz": "trajectory_samples_in_simulation_time_s",
+    "reward_timeseries": "simulation_time_s"
+  },
+  "stable_arrival_contract": {
+    "goal_threshold_m": 1.0,
+    "speed_threshold_mps": 0.5,
+    "near_goal_radius_m": 5.0,
+    "speed_source": "trajectory.csv actual UAV velocity used by the reward",
+    "stable_goal_definition": "estimated goal distance <= goal threshold and actual speed <= speed threshold"
+  },
+  "transformations": {
+    "localization": "position and velocity RMSE are computed from aligned ground_truth.csv and estimates.csv; covariance trace is read from the estimate covariance matrix",
+    "goal_distance": "distance is computed from EKF-estimated XYZ position to the configured goal; estimated speed and the configured near-goal/stable-arrival thresholds are overlaid; simulator truth is not used",
+    "trajectory": "trajectory.csv state samples are plotted without smoothing or resampling; ground truth.csv is overlaid when aligned",
+    "reward": "reward components are averaged by timestamp across UAV rows; this episode contains one UAV"
+  },
+  "plots": {
+    "localization_error_timeseries": "D:\\research project\\plots\\preliminary\\single_uav_nav_goal_v2_stable_seed2026\\single_uav_diagnostics_episode_500001\\localization_error_timeseries.png",
+    "goal_distance_timeseries": "D:\\research project\\plots\\preliminary\\single_uav_nav_goal_v2_stable_seed2026\\single_uav_diagnostics_episode_500001\\goal_distance_timeseries.png",
+    "flight_trajectory_xy_xyz": "D:\\research project\\plots\\preliminary\\single_uav_nav_goal_v2_stable_seed2026\\single_uav_diagnostics_episode_500001\\flight_trajectory_xy_xyz.png",
+    "reward_timeseries": "D:\\research project\\plots\\preliminary\\single_uav_nav_goal_v2_stable_seed2026\\single_uav_diagnostics_episode_500001\\reward_timeseries.png"
+  },
+  "claim_boundary": "single-episode diagnostic only; this does not establish convergence, generalization, or communication cooperation performance",
+  "communication_scope": "single-UAV episodes have no inter-UAV communication links; packet loss, delay, and AoI should not be interpreted as learned UAV-to-UAV communication behavior"
+}

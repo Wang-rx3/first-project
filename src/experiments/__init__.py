@@ -14,6 +14,7 @@ from .single_uav_diagnostics import (
     SingleUAVDiagnosticsConfig,
     plot_single_uav_diagnostics,
 )
+from .single_uav_navigation_analysis import analyze_single_uav_navigation
 from .scenario_screening import ScenarioScreeningConfig, run_scenario_screening
 from .quality_feature_sensitivity_audit import (
     QualityFeatureSensitivityAuditConfig,
@@ -99,6 +100,7 @@ __all__ = [
     "plot_main_figures",
     "SingleUAVDiagnosticsConfig",
     "plot_single_uav_diagnostics",
+    "analyze_single_uav_navigation",
     "ScenarioScreeningConfig",
     "run_scenario_screening",
     "QualityFeatureSensitivityAuditConfig",

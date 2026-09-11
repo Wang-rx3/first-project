@@ -2323,3 +2323,277 @@ actor loss 约为 `-0.1038` 至 `0.0313`，KL、entropy、clip fraction 均有�
 ```text
 data/synthetic/three_uav_comm_regression_seed2026/
 ```
+
+#### 单 UAV 导航奖励 v2（2026-09-10）
+
+按照单无人机奖励设计，新增并启用 `loc_goal_v2`。该模式只作用于 1 UAV 的 PPO 学习通道，历史
+`reporting_reward`、多 UAV 通信奖励路径和 `loc_goal_v1` 均保持不变。训练奖励为：
+
+```text
+r_learning = goal_progress + goal_arrival_bonus
+              - localization_cost - collision_cost - energy_cost
+goal_progress = alpha * (estimated_goal_distance_previous - estimated_goal_distance_current)
+```
+
+其中 `alpha=1.0`、定位不确定度代价权重为 `0.2`、首次进入估计目标半径 `1 m` 时给予一次性
+`+1.0` 奖励；进度奖励使用米制距离差，避免 warm-up 的小尺度和 `[-1, 1]` 裁剪把大多数动作
+都压成同一个负奖励。归一化的 goal-progress score 仍保留在日志中，仅用于诊断。
+
+正式运行保持固定场景和 1 UAV 不变，配置为 100 步/回合、10 个 warm-up、100 个训练回合、20 个
+validation 回合和 20 个 test 回合：
+
+```text
+data/synthetic/single_uav_nav_goal_v2_raw_seed2026/
+logs/preliminary/single_uav_nav_goal_v2_raw_seed2026/
+plots/preliminary/single_uav_nav_goal_v2_raw_seed2026/
+```
+
+schema 验证通过，100 次 PPO update 和全部 140 个回合均有完整日志。训练学习回报由第 1 回合约
+`-68.07` 改善到第 100 回合约 `-51.96`，说明目标进度项已经进入学习信号；但 test 的固定策略仍
+表现为先靠近目标、随后越过目标继续飞行，20 个 test 回合尚未触发 1 m 到达奖励。因此本轮证明
+的是奖励通道和诊断链路已正确接入，不是策略已经收敛。该结果仍属于单种子工程诊断，不能替代多
+种子性能实验或多 UAV 协同通信结论。
+
+#### 单 UAV 稳定到达奖励与近目标减速（2026-09-10）
+
+在 `loc_goal_v2` 上继续执行“先接近、再减速、稳定停靠”的奖励设计。新的学习奖励为：
+
+```text
+r_learning = goal_progress + stable_goal_bonus
+              - localization_cost - near_goal_speed_cost
+              - collision_cost - energy_cost
+goal_progress = alpha * (estimated_goal_distance_previous - estimated_goal_distance_current)
+near_goal_speed_cost = gamma * ||v_t||, when estimated_goal_distance_current <= 5 m
+```
+
+本轮稳定到达判据为：估计目标距离不超过 `1 m`，且无人机实际速度不超过 `0.5 m/s`。只有首次满足
+这两个条件时才发放一次性 `+5.0` 稳定到达奖励；`loc_goal_v2` 同时将该状态作为成功终止条件。
+旧版 `loc_goal_v1`、默认奖励路径和多 UAV 通信路径不变。诊断图中的目标距离曲线、实际速度曲线、
+`1 m` 稳定目标线、`5 m` 近目标线和 `0.5 m/s` 稳定速度线均来自对应 episode 日志。
+
+正式运行仍固定为 1 UAV、`scenario_seed=2026`、100 步/回合、10 个 warm-up、100 个训练回合、
+20 个 validation 回合和 20 个 test 回合，输出为：
+
+```text
+data/synthetic/single_uav_nav_goal_v2_stable_seed2026/
+logs/preliminary/single_uav_nav_goal_v2_stable_seed2026/
+plots/preliminary/single_uav_nav_goal_v2_stable_seed2026/
+```
+
+本轮 schema 验证通过，140 个 episode 和 100 次 PPO update 均有完整记录。训练学习回报由第 1 回合
+约 `-68.07` 改善到第 100 回合约 `-49.06`，训练期间最优回报约为 `-19.24`；但固定策略在 20 个
+test 回合中没有进入 `1 m` 目标半径，也没有触发稳定到达奖励，全部因时间上限结束。全部 140 个
+回合的最小估计目标距离为约 `1.69 m`，说明近目标速度惩罚已经被记录，但当前 100 回合、单种子配置
+仍未学会“减速并稳定停靠”。因此本轮完成了奖励和成功判据的代码修改及可复现实验，但不能把该结果
+表述为导航已收敛；下一步应在保持判据不变的前提下做多种子或更长训练，并单独报告稳定到达率。
+
+#### 单 UAV 导航失败分析与制动敏感性实验（2026-09-10）
+
+为区分“不会接近目标”和“接近后不会刹车”，新增了跨 episode 的导航分析：每个回合记录最小
+估计目标距离、进入近目标区域的指标、进入目标半径的指标、稳定到达指标，以及进入近目标区域时
+的速度；同时从原始时间步日志绘制速度—目标距离关系 `v(d)`。分析结果不做平滑、重采样或跨回合
+平均，速率的分母是各 split 的 episode 数。
+
+基线 `single_uav_nav_goal_v2_stable_seed2026` 的结果为：训练集进入 `5 m` 的比例为 `5/100`，
+进入后的平均速度约 `4.22 m/s`；validation 和 test 进入 `5 m` 的比例均为 `0/20`。进入 `5 m`
+的训练回合，其首次进入速度约为 `3.77 m/s`，明显高于 `0.5 m/s` 稳定速度阈值；进入 `1 m`
+和稳定到达的比例均为 0。这确认主要问题是制动信号不足。
+
+在不改变 UAV 数量、场景种子、步数和训练回合数的情况下，完成了三组制动敏感性对照：
+
+```text
+single_uav_nav_goal_v2_braking_seed2026
+  near_goal_radius=8 m, speed_penalty_weight=0.4, learning_reward_clip=1.0
+
+single_uav_nav_goal_v2_braking5_seed2026
+  near_goal_radius=5 m, speed_penalty_weight=0.4, learning_reward_clip=1.0
+
+single_uav_nav_goal_v2_braking_shaped_seed2026
+  near_goal_radius=8 m, speed_penalty_weight=0.4, learning_reward_clip=3.0
+```
+
+为避免阈值混淆，`braking5` 与基线都以 `5 m` 作为近目标半径：test 进入 `5 m` 的比例由 `0/20`
+变为 `2/20`，最小目标距离由约 `7.60 m` 降到约 `4.63 m`；但进入时平均速度仍约 `4.71 m/s`，
+稳定到达仍为 `0/20`。`braking` 提前在 `8 m` 开始惩罚，test 进入 `8 m` 为 `2/20`，进入时平均速度
+约 `3.70 m/s`，同样没有稳定到达。`braking_shaped` 放宽学习奖励裁剪后未进入 `8 m`，test 最小
+目标距离约 `13.23 m`。因此当前结论是：增大近目标速度惩罚能让少量回合更接近目标，但还没有形成
+有效的低速制动策略；直接放大学习奖励幅值反而破坏导航行为，三组参数均不覆盖默认配置。
+
+新增分析代码和命令为：
+
+```text
+src/experiments/single_uav_navigation_analysis.py
+main.py analyze-single-uav-navigation <scale_1>
+```
+
+上述各组结果的 CSV 和 `v(d)` 图均保存在对应的 `logs/preliminary/` 与 `plots/preliminary/` 目录中，
+均属于单种子固定场景诊断，不能替代多种子成功率或多 UAV 协同通信实验。
+
+#### 单 UAV 距离—期望速度制动策略（2026-09-10）
+
+针对“接近目标后不会提前刹车”，在 `loc_goal_v2` 中新增了可选的
+`distance_target_speed` 模式。该模式在 `8 m` 外允许 `6 m/s` 巡航，在 `1--8 m` 之间将目标速度
+从 `6 m/s` 线性降至稳定速度阈值 `0.5 m/s`，只惩罚实际速度超过该距离相关目标速度的部分：
+
+```text
+run-preliminary --output data/synthetic/single_uav_nav_goal_v2_distance_target_speed_seed2026 --uav-counts 1 --seed 2026 --scenario-seed 2026 --steps 100 --warmup-episodes 10 --train-episodes 100 --validation-episodes 20 --test-episodes 20 --single-uav-learning-mode loc_goal_v2 --single-uav-speed-control-mode distance_target_speed --single-uav-near-goal-radius-m 8.0 --single-uav-near-goal-speed-penalty-weight 0.4 --single-uav-target-speed-far-mps 6.0 --learning-reward-clip 1.0 --device cpu --force --quiet
+```
+
+```text
+v_target(d) = 6.0                         , d >= 8 m
+              0.5 + (d - 1) * 5.5 / 7     , 1 m < d < 8 m
+              0.5                         , d <= 1 m
+r_speed = -0.4 * max(0, actual_speed - v_target(d))
+```
+
+实验只改变速度控制模式，保持 `uav_count=1`、`seed=2026`、`scenario_seed=2026`、100 步/回合、
+100/20/20 个训练/validation/test 回合和 `learning_reward_clip=1.0` 不变。与相同 `8 m` 半径、
+固定速度惩罚的对照相比，新模式训练集最小目标距离约为 `1.09 m`，进入 `8 m` 为 `14/100`，
+近目标样本的平均超速量约 `0.32 m/s`；但 validation/test 均为 `0/20` 进入 `8 m`，test 最小
+目标距离约 `8.06 m`，稳定到达仍为 `0/20`。因此该奖励改善了训练集接近行为，但尚未形成可泛化
+的刹车策略，不能据此认为单 UAV 导航已经收敛。默认模式仍为 `fixed_near_goal`，后续应优先检查
+动作空间的减速可控性并进行多随机种子验证。
+
+本轮新增日志字段包括 `single_uav_target_speed_mps`、`single_uav_speed_excess_mps` 和
+`single_uav_speed_control_mode`；`v(d)` 图会叠加实际目标速度曲线。输出位于：
+
+```text
+data/synthetic/single_uav_nav_goal_v2_distance_target_speed_seed2026/
+logs/preliminary/single_uav_nav_goal_v2_distance_target_speed_seed2026/
+plots/preliminary/single_uav_nav_goal_v2_distance_target_speed_seed2026/
+```
+
+#### 单 UAV 动作空间与制动能力审计（2026-09-10）
+
+针对距离—期望速度实验中“能接近目标但未稳定到达”的现象，进一步检查了
+`Actor 输出 → 动作映射 → 运动模型 → 速度 → 位置` 的完整链路，并直接覆盖重新运行了上面的
+`single_uav_nav_goal_v2_distance_target_speed_seed2026` 结果。审计确认当前动作空间已经支持有效制动，
+不需要额外添加离散 `brake` 动作：动作是三维连续速度增量 `Δv`，每个 `0.2 s` 决策窗口的最大范数为
+`0.6 m/s`（等效最大加速度 `3.0 m/s²`），允许负向速度增量；运动模型按
+`v_next = clip(v_pre + Δv_applied, v_max)` 更新速度。
+
+新增 `actions.csv` 字段记录动作前后速度、命令/实际速度增量、纵向制动分量、实际减速量、制动是否被速度上限阻塞，
+并生成 `braking_action_response.png` 与 `braking_action_summary.png`。制动定义为实际 `Δv` 在动作前速度方向上的负投影，
+有效制动定义为动作后速度严格低于动作前速度；制动率的分母是动作样本数，近目标制动率的分母是带有精确时间戳匹配的近目标动作样本数。
+
+最终 1 UAV、固定场景、`seed=2026` 结果显示：训练集 `1427/10000=14.27%` 的动作产生制动，制动动作中
+`1297/1427=90.89%` 实际降低了速度；进入 `8 m` 后的动作样本为 `170`，其中 `12` 次制动，且有效率为 `10/12=83.33%`。
+因此动作空间和运动模型确实能够执行减速，当前主要瓶颈不是“没有刹车动作”，而是策略在近目标区域主动制动的频率不足以及验证/测试策略没有泛化到目标附近。
+训练集进入 `8 m` 为 `14/100`、最小距离约 `1.09 m`，但 validation/test 均为 `0/20` 进入 `8 m`，稳定到达仍为 `0/20`。
+本结果仍属于单种子工程诊断，不能表述为导航已经收敛。
+
+本轮新增或更新的关键产物为：
+
+```text
+src/simulation/motion_model.py
+src/experiments/pilot.py
+src/experiments/single_uav_diagnostics.py
+src/experiments/single_uav_navigation_analysis.py
+tests/test_motion_model.py
+tests/test_single_uav_navigation_analysis.py
+```
+
+#### 单 UAV 制动课程与目标速度动作匹配验证（2026-09-10）
+
+为解决“策略能否及时、持续、稳定地减速到目标”，在不改变单 UAV 固定场景和动作空间的前提下，
+加入了两类可审计的训练信号：训练阶段交错采样 `3/5/8 m` 局部制动起点，以及将实际执行的 `Δv`
+与距离相关目标速度对应的期望 `Δv` 进行匹配。验证与测试仍从原始远距离起点开始，稳定到达仍定义为
+估计距离不超过 `1 m`、实际速度不超过 `0.5 m/s` 并连续保持 `5` 步。
+
+最后一轮 `targetvelocity3` 结果仍未解决该问题：test 进入 `8 m` 为 `20/20`，但进入 `1 m` 为
+`0/20`、稳定到达为 `0/20`；近目标动作样本中制动为 `0`，近目标平均速度约 `3.83 m/s`，
+而目标速度约 `3.09 m/s`。因此本轮结论是：动作空间和运动模型支持制动，奖励和动作匹配信号也已记录，
+但当前 PPO 策略仍未把近目标制动泛化到确定性验证/测试轨迹。本次按要求停止继续试验，不能把该版本称为
+“已稳定到达”。
+
+对应产物位于：
+
+```text
+data/synthetic/single_uav_nav_goal_v2_braking_distance_targetvelocity3_seed2026/
+logs/preliminary/single_uav_nav_goal_v2_braking_distance_targetvelocity3_seed2026/
+plots/preliminary/single_uav_nav_goal_v2_braking_distance_targetvelocity3_seed2026/
+```
+
+本轮关键实现位于 `src/simulation/environment.py`、`src/experiments/formal.py`、`src/cli.py`、
+`src/schema.py` 和 `src/experiments/pilot.py`；新增制动课程测试为
+`tests/test_single_uav_braking_curriculum.py`。针对性测试通过，`git diff --check` 无格式错误。
+
+#### 单 UAV 透明制动安全投影验证（2026-09-10）
+
+为验证“策略能否及时、持续、稳定地减速到目标”，在上一轮 `targetvelocity3` 配置基础上增加了
+可选的低层制动安全投影。策略仍输出原始三维连续 `Δv`；当当前或下一步预测速度超过停车距离包络，
+或物理位置进入目标半径时，执行层才把动作投影到允许的目标速度，并在 `actions.csv` 中同时保存
+原始动作、实际动作、投影原因、目标速度和投影 Δv。该机制不增加离散 `brake` 动作，也不改变场景几何。
+
+本轮固定 `uav_count=1`、`seed=2026`、`scenario_seed=2026`、100 步/回合和 100/20/20 个
+训练/validation/test 回合。针对性单元测试为 `21 passed`，实验数据 schema 验证为 `scale_1=True`。
+结果如下：
+
+```text
+test 进入 8 m：20/20
+test 进入 1 m（按 EKF 估计距离）：3/20
+test 稳定到达：3/20
+test 近目标平均超速量：约 0.0026 m/s
+test 近目标有效制动动作：61 次
+```
+
+这说明低层执行闭环已经把“进入目标附近后仍高速冲过”的问题显著压下去了；但是仍有 17/20 个
+测试回合没有按估计距离进入 `1 m`，因此不能把本轮称为“策略已经稳定到达”。诊断还发现，部分
+回合的物理位置已经进入目标半径并被执行层保持，但 EKF 估计距离仍大于 `1 m`，暴露出安全投影
+状态源与成功判据状态源不一致的问题。其余主要瓶颈已从“不会刹车”转移为“远距离导航/末端目标捕获
+和估计误差下的成功判定”。
+
+本轮结果目录为：
+
+```text
+data/synthetic/single_uav_nav_goal_v2_braking_distance_safety_projection_seed2026/
+logs/preliminary/single_uav_nav_goal_v2_braking_distance_safety_projection_seed2026/
+plots/preliminary/single_uav_nav_goal_v2_braking_distance_safety_projection_seed2026/
+```
+
+下一次若继续，应先统一安全投影与成功判据的状态源，并在 `8 m` 目标捕获区增加“动作必须保持目标
+方向进度”的末端约束，再做多随机种子验证；在此之前不应进入多 UAV 通信结论。
+
+#### 单 UAV 独立边界惩罚与局部奖励接口（2026-09-10）
+
+根据附件要求，在现有单 UAV 训练链路中加入了可选的独立边界惩罚，默认值为 `0.0`，本轮新实验使用
+`boundary_penalty_weight=0.5`。边界物理处理保持不变：动作越界后位置投影回合法区域、速度按实际位移
+修正、回合继续；`boundary_projected`、`safety_projected`、`action_clipped` 和 `collision` 仍是互相独立
+的诊断量。边界惩罚按每架 UAV 每个 step 计算一次，同一步多轴越界不重复计罚：
+
+```text
+r_boundary(i,t) = -0.5, boundary_projected(i,t)=True
+                  0.0, otherwise
+r_learning(i,t) = base_learning_reward(t) + r_boundary(i,t)
+```
+
+该项在现有 learning reward 的最终裁剪前加入；单 UAV learning channel 继续沿用原有 bounded clip，
+非单 UAV 的既有 `report_plus_feedback`/`report_direct` 路径不被额外改写。`reporting_rewards`、
+`team_reward` 和通信/定位物理报告指标没有改变，只有传给 PPO 的 `learning_rewards` 增加了 per-UAV 局部项。
+形式化 runner 仍通过 `next_info["learning_rewards"]` 传入 rollout buffer 和 PPO update，没有修改 MAPPO 网络或
+actor observation。
+
+新增的诊断包括 `base_learning_reward`、`boundary_reward`、`boundary_projected`、
+`boundary_projection_count`、`learning_reward_preclip`、`boundary_events` 和
+`boundary_penalty_sum`，并写入 episode reward CSV、episode summary、scenario manifest 和正式实验 manifest。
+新增边界测试覆盖无越界、单轴越界、多轴单次计数、边界与碰撞/安全投影分离、回合不终止、PPO learning reward
+变化、multi-UAV 局部独立性和零权重向后兼容。
+
+为避免覆盖已有稳定基线，使用完全相同的单 UAV 固定场景配置新建：
+
+```text
+data/synthetic/single_uav_nav_goal_v2_boundary_seed2026/
+logs/preliminary/single_uav_nav_goal_v2_boundary_seed2026/
+plots/preliminary/single_uav_nav_goal_v2_boundary_seed2026/
+```
+
+与 `single_uav_nav_goal_v2_stable_seed2026` 对比：新实验训练集出现 `144` 次边界事件、涉及 `32/100`
+个 episode，边界惩罚累计为 `-72.0`；validation 无边界事件；test 出现 `2` 次、涉及 `1/20` 个 episode，
+累计为 `-1.0`。test 两组均无碰撞、稳定到达率仍为 `0/20`；基线 test 最小目标距离约 `7.60 m`，新实验约
+`13.08 m`，训练平均 learning return 由约 `-51.49` 变为 `-56.25`，test 平均 learning return 由约
+`-51.86` 变为 `-59.05`。报告 reward 基线与新实验均约为 `-69.74`，说明新增项确实只影响 learning channel，
+但在当前固定权重下也使策略更倾向于避开边界，导航效果暂时变差。
+
+新实验的 manifest/schema 校验通过；针对性边界测试 `22 passed`，全量回归测试 `357 passed, 5 skipped`。
+当前结果属于单种子、固定场景的机制验证，下一步若要提升导航效果，应再做权重敏感性或更合理的训练场景，
+但不应把这次 `0.5` 边界惩罚结果直接作为多 UAV 协同结论。

@@ -1,0 +1,78 @@
+{
+  "figure_type": "single_uav_navigation_failure_analysis",
+  "scale_path": "D:\\research project\\data\\synthetic\\single_uav_nav_goal_v2_distance_target_speed_smoke_seed2026\\scale_1",
+  "uav_count": 1,
+  "source": {
+    "episode_reward_logs": "scale/{train,validation,test}/episode_*/rewards.csv",
+    "episode_scenario_logs": "scale/{train,validation,test}/episode_*/scenario.json",
+    "actual_speed_fallback": "trajectory.csv vx/vy/vz when rewards.csv lacks single_uav_speed_mps"
+  },
+  "seed_set": [
+    1002026,
+    1102026,
+    902026,
+    903035
+  ],
+  "thresholds": {
+    "goal_threshold_m": 1.0,
+    "near_goal_radius_m": 8.0,
+    "speed_threshold_mps": 0.5,
+    "speed_control_mode": "distance_target_speed",
+    "target_speed_far_mps": 6.0
+  },
+  "denominator": "episode count within each split for rates; step samples for v(d)",
+  "transformations": {
+    "minimum_goal_distance": "minimum finite current_goal_distance per episode",
+    "entry_rates": "indicator that any finite step enters the configured radius",
+    "near_goal_speed": "speed at first near-goal sample and mean/min speed over near-goal samples",
+    "speed_distance_relation": "raw finite step samples; no smoothing, resampling, or filtering beyond finite-value checks",
+    "distance_target_speed": "piecewise-linear target speed from the recorded reward configuration; diagnostic overlay only"
+  },
+  "summary": {
+    "train": {
+      "episode_count": 2,
+      "minimum_goal_distance_m": 19.69272616,
+      "entered_near_goal_episodes": 0,
+      "entered_near_goal_rate": 0.0,
+      "entered_goal_radius_episodes": 0,
+      "entered_goal_radius_rate": 0.0,
+      "stable_goal_episodes": 0,
+      "stable_goal_rate": 0.0,
+      "mean_speed_at_near_goal_entry_mps": NaN,
+      "mean_speed_within_near_goal_mps": NaN,
+      "speed_threshold_mps": 0.5
+    },
+    "validation": {
+      "episode_count": 1,
+      "minimum_goal_distance_m": 19.706231182,
+      "entered_near_goal_episodes": 0,
+      "entered_near_goal_rate": 0.0,
+      "entered_goal_radius_episodes": 0,
+      "entered_goal_radius_rate": 0.0,
+      "stable_goal_episodes": 0,
+      "stable_goal_rate": 0.0,
+      "mean_speed_at_near_goal_entry_mps": NaN,
+      "mean_speed_within_near_goal_mps": NaN,
+      "speed_threshold_mps": 0.5
+    },
+    "test": {
+      "episode_count": 1,
+      "minimum_goal_distance_m": 19.721432488,
+      "entered_near_goal_episodes": 0,
+      "entered_near_goal_rate": 0.0,
+      "entered_goal_radius_episodes": 0,
+      "entered_goal_radius_rate": 0.0,
+      "stable_goal_episodes": 0,
+      "stable_goal_rate": 0.0,
+      "mean_speed_at_near_goal_entry_mps": NaN,
+      "mean_speed_within_near_goal_mps": NaN,
+      "speed_threshold_mps": 0.5
+    }
+  },
+  "claim_boundary": "single-seed, fixed-scenario navigation diagnostic; it does not establish convergence, generalization, or multi-UAV communication performance",
+  "outputs": {
+    "metrics_csv": "D:\\research project\\logs\\preliminary\\single_uav_nav_goal_v2_distance_target_speed_smoke_seed2026\\single_uav_navigation_analysis.csv",
+    "navigation_failure_analysis": "D:\\research project\\plots\\preliminary\\single_uav_nav_goal_v2_distance_target_speed_smoke_seed2026\\single_uav_navigation_analysis\\navigation_failure_analysis.png",
+    "speed_distance_relation": "D:\\research project\\plots\\preliminary\\single_uav_nav_goal_v2_distance_target_speed_smoke_seed2026\\single_uav_navigation_analysis\\speed_distance_relation.png"
+  }
+}

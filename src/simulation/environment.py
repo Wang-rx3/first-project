@@ -17,7 +17,13 @@ from ..synthetic.channel_model import ChannelConfig
 from ..schema import EPISODE_SCHEMA_VERSION
 from .ekf import EKFConfig, LocalEKF, STATE_DIM, covariance_intersection
 from .graph_interface import GraphBatch, build_graph_batch
-from .motion_model import MotionConfig, UAVKinematicState, apply_velocity_increment
+from .motion_model import (
+    MotionConfig,
+    UAVKinematicState,
+    apply_velocity_increment,
+    braking_distance_target_speed,
+    stopping_distance_m,
+)
 from .obstacle_model import (
     BoxObstacle,
     Obstacle,
@@ -56,6 +62,35 @@ def _as_bool(value: Any, default: bool = True) -> bool:
     return bool(default)
 
 
+def _distance_target_speed(
+    distance_m: float,
+    *,
+    goal_threshold_m: float,
+    near_goal_radius_m: float,
+    stable_speed_mps: float,
+    far_target_speed_mps: float,
+) -> float:
+    """Return the admissible speed for the current distance to the goal.
+
+    The target speed is piecewise linear between the stable-arrival speed at
+    the goal radius and the cruise speed at the near-goal boundary.  Outside
+    that boundary the cruise target is retained; inside the goal radius the
+    stable-arrival target is retained.
+    """
+
+    distance = float(distance_m)
+    goal_radius = float(goal_threshold_m)
+    near_radius = float(near_goal_radius_m)
+    stable_speed = float(stable_speed_mps)
+    far_speed = float(far_target_speed_mps)
+    if distance <= goal_radius:
+        return stable_speed
+    if distance >= near_radius or near_radius <= goal_radius:
+        return far_speed
+    interpolation = (distance - goal_radius) / (near_radius - goal_radius)
+    return float(stable_speed + interpolation * (far_speed - stable_speed))
+
+
 @dataclass(frozen=True)
 class RewardConfig:
     uncertainty_scale: float = 100.0
@@ -63,6 +98,10 @@ class RewardConfig:
     delay_scale: float = 1.0
     collision_penalty: float = 10.0
     energy_weight: float = 0.01
+    # Training-only local shaping.  A boundary projection is a physical
+    # constraint event, not a collision; the default keeps historical reward
+    # behavior unchanged.
+    boundary_penalty_weight: float = 0.0
     # When supplied, these are fitted only from the training split (normally
     # the training warm-up trajectories). Validation and test environments
     # receive the same values and never refit them.
@@ -84,9 +123,10 @@ class RewardConfig:
     )
 
     # Optional single-UAV learning channel.  ``off`` preserves the historical
-    # learning reward exactly.  ``loc_goal_v1`` is enabled explicitly for the
-    # localization-first single-UAV baseline; it never changes the reporting
-    # reward or the physical communication metrics.
+    # learning reward exactly.  ``loc_goal_v1`` is the localization-first
+    # baseline.  ``loc_goal_v2`` adds an explicit navigation signal and a
+    # one-shot goal-arrival bonus.  Neither mode changes the reporting reward
+    # or the physical communication metrics.
     single_uav_learning_mode: str = "off"
     single_uav_learning_weights: Mapping[str, float] = field(
         default_factory=lambda: {
@@ -94,6 +134,60 @@ class RewardConfig:
             "goal_progress": 0.2,
         }
     )
+    # The v2 navigation channel uses the signed estimated goal-distance change
+    # directly as a dense progress reward (reward units per metre), charges a
+    # bounded localization uncertainty cost, and grants a one-time bonus only
+    # after entering the goal radius at a low speed.  A near-goal speed cost
+    # encourages braking before the UAV crosses the target.
+    # These are training-only values; the report reward is unchanged.
+    single_uav_goal_progress_coef: float = 1.0
+    single_uav_localization_cost_weight: float = 0.2
+    single_uav_goal_bonus: float = 5.0
+    single_uav_goal_threshold_m: float = 1.0
+    single_uav_goal_speed_threshold_mps: float = 0.5
+    single_uav_near_goal_radius_m: float = 5.0
+    single_uav_near_goal_speed_penalty_weight: float = 0.1
+    # ``fixed_near_goal`` preserves the previous cost ``weight * speed``.
+    # ``distance_target_speed`` instead penalizes only speed above a target
+    # that decreases linearly from the cruise target to the stable-arrival
+    # speed as the UAV approaches the goal.
+    single_uav_speed_control_mode: str = "fixed_near_goal"
+    single_uav_target_speed_far_mps: float = 6.0
+    # ``braking_distance`` uses a conservative stopping-distance envelope
+    # rather than waiting until the near-goal radius.  The design acceleration
+    # is intentionally no larger than the physical limit and the margin keeps
+    # the learned policy from braking exactly on the success boundary.
+    single_uav_braking_acceleration_mps2: float = 2.0
+    single_uav_braking_margin_m: float = 2.0
+    single_uav_stable_hold_steps: int = 1
+    single_uav_goal_hold_reward: float = 0.0
+    # The stopping-distance controller is a two-sided speed-tracking signal:
+    # a small deficit cost prevents the policy from choosing the trivial
+    # slow/stationary solution far from the goal, while the existing excess
+    # cost still forces braking as the admissible speed falls.
+    single_uav_speed_deficit_penalty_weight: float = 0.05
+    # A gated action-direction signal makes the navigation objective easier to
+    # learn than a noisy scalar distance difference alone.  It rewards an
+    # applied increment that points toward the goal while the UAV is driving
+    # forward, but gives neutral direction credit while the increment brakes.
+    # This keeps navigation guidance and timely braking from competing for the
+    # same action: a brake is evaluated by the braking channel below.
+    single_uav_goal_direction_coef: float = 0.75
+    # When the pre-action speed is above the stopping-distance target, an
+    # executed braking action receives credit and continued acceleration is
+    # penalized.  This supplies local action-level credit for timely braking
+    # instead of relying only on a delayed state-speed cost.
+    single_uav_braking_action_reward_coef: float = 1.0
+    # Optional vector-level action shaping. The target is the admissible
+    # goal-directed velocity implied by the stopping-distance envelope; the
+    # reward compares the executed delta-v with the delta-v needed to track
+    # that target. Zero preserves the preceding reward contract.
+    single_uav_target_velocity_action_reward_coef: float = 0.0
+    # Optional transparent low-level safety supervisor. When enabled, a
+    # policy command that would cross the stopping-distance envelope is
+    # projected to the admissible target velocity; the intervention is logged
+    # separately from the policy action.
+    single_uav_braking_safety_projection_enabled: bool = False
 
     # The historical reporting reward is kept intact.  The optional learning
     # channel is bounded and is passed to PPO separately by the formal runner.
@@ -126,9 +220,9 @@ class RewardConfig:
     potential_epsilon: float = 1e-6
 
     def __post_init__(self) -> None:
-        if self.single_uav_learning_mode not in {"off", "loc_goal_v1"}:
+        if self.single_uav_learning_mode not in {"off", "loc_goal_v1", "loc_goal_v2"}:
             raise ValueError(
-                "single_uav_learning_mode must be off or loc_goal_v1"
+                "single_uav_learning_mode must be off, loc_goal_v1, or loc_goal_v2"
             )
         if not isinstance(self.single_uav_learning_weights, Mapping):
             raise ValueError("single_uav_learning_weights must be a mapping")
@@ -154,6 +248,123 @@ class RewardConfig:
             )
         if not np.isclose(sum(single_uav_weight_values), 1.0, atol=1e-8):
             raise ValueError("single_uav_learning_weights must sum to one")
+        for name, value in (
+            ("single_uav_goal_progress_coef", self.single_uav_goal_progress_coef),
+            (
+                "single_uav_localization_cost_weight",
+                self.single_uav_localization_cost_weight,
+            ),
+            ("single_uav_goal_bonus", self.single_uav_goal_bonus),
+        ):
+            if not np.isfinite(float(value)) or float(value) < 0.0:
+                raise ValueError(f"{name} must be finite and non-negative")
+        if (
+            not np.isfinite(float(self.single_uav_goal_threshold_m))
+            or float(self.single_uav_goal_threshold_m) <= 0.0
+        ):
+            raise ValueError("single_uav_goal_threshold_m must be finite and positive")
+        if (
+            not np.isfinite(float(self.single_uav_goal_speed_threshold_mps))
+            or float(self.single_uav_goal_speed_threshold_mps) <= 0.0
+        ):
+            raise ValueError(
+                "single_uav_goal_speed_threshold_mps must be finite and positive"
+            )
+        if (
+            not np.isfinite(float(self.single_uav_near_goal_radius_m))
+            or float(self.single_uav_near_goal_radius_m)
+            < float(self.single_uav_goal_threshold_m)
+        ):
+            raise ValueError(
+                "single_uav_near_goal_radius_m must be at least the goal threshold"
+            )
+        if (
+            not np.isfinite(float(self.single_uav_near_goal_speed_penalty_weight))
+            or float(self.single_uav_near_goal_speed_penalty_weight) < 0.0
+        ):
+            raise ValueError(
+                "single_uav_near_goal_speed_penalty_weight must be finite and non-negative"
+            )
+        if self.single_uav_speed_control_mode not in {
+            "fixed_near_goal",
+            "distance_target_speed",
+            "braking_distance",
+        }:
+            raise ValueError(
+                "single_uav_speed_control_mode must be fixed_near_goal, "
+                "distance_target_speed, or braking_distance"
+            )
+        if (
+            not np.isfinite(float(self.single_uav_target_speed_far_mps))
+            or float(self.single_uav_target_speed_far_mps)
+            < float(self.single_uav_goal_speed_threshold_mps)
+        ):
+            raise ValueError(
+                "single_uav_target_speed_far_mps must be finite and at least "
+                "single_uav_goal_speed_threshold_mps"
+            )
+        if (
+            not np.isfinite(float(self.single_uav_braking_acceleration_mps2))
+            or float(self.single_uav_braking_acceleration_mps2) <= 0.0
+        ):
+            raise ValueError(
+                "single_uav_braking_acceleration_mps2 must be finite and positive"
+            )
+        if (
+            not np.isfinite(float(self.single_uav_braking_margin_m))
+            or float(self.single_uav_braking_margin_m) < 0.0
+        ):
+            raise ValueError(
+                "single_uav_braking_margin_m must be finite and non-negative"
+            )
+        if (
+            isinstance(self.single_uav_stable_hold_steps, bool)
+            or int(self.single_uav_stable_hold_steps)
+            != self.single_uav_stable_hold_steps
+            or int(self.single_uav_stable_hold_steps) < 1
+        ):
+            raise ValueError("single_uav_stable_hold_steps must be a positive integer")
+        if (
+            not np.isfinite(float(self.single_uav_goal_hold_reward))
+            or float(self.single_uav_goal_hold_reward) < 0.0
+        ):
+            raise ValueError(
+                "single_uav_goal_hold_reward must be finite and non-negative"
+            )
+        if (
+            not np.isfinite(float(self.single_uav_speed_deficit_penalty_weight))
+            or float(self.single_uav_speed_deficit_penalty_weight) < 0.0
+        ):
+            raise ValueError(
+                "single_uav_speed_deficit_penalty_weight must be finite and non-negative"
+            )
+        if (
+            not np.isfinite(float(self.single_uav_goal_direction_coef))
+            or float(self.single_uav_goal_direction_coef) < 0.0
+        ):
+            raise ValueError(
+                "single_uav_goal_direction_coef must be finite and non-negative"
+            )
+        if (
+            not np.isfinite(float(self.single_uav_braking_action_reward_coef))
+            or float(self.single_uav_braking_action_reward_coef) < 0.0
+        ):
+            raise ValueError(
+                "single_uav_braking_action_reward_coef must be finite and non-negative"
+            )
+        if (
+            not np.isfinite(float(self.single_uav_target_velocity_action_reward_coef))
+            or float(self.single_uav_target_velocity_action_reward_coef) < 0.0
+        ):
+            raise ValueError(
+                "single_uav_target_velocity_action_reward_coef must be finite and non-negative"
+            )
+        if not isinstance(
+            self.single_uav_braking_safety_projection_enabled, bool
+        ):
+            raise ValueError(
+                "single_uav_braking_safety_projection_enabled must be boolean"
+            )
         if self.learning_reward_mode == "report_direct" and (
             self.learning_feedback_mode != "v3" or self.learning_potential_coef != 0.0
             or self.loc_progress_coef != 0.0 or self.actual_measurement_cost_enabled
@@ -258,6 +469,7 @@ class RewardConfig:
                     "accepted_update_progress_v2 requires a positive warm-up feedback scale"
                 )
         for name, value in (
+            ("boundary_penalty_weight", self.boundary_penalty_weight),
             ("learning_reward_clip", self.learning_reward_clip),
             ("learning_collision_penalty_cap", self.learning_collision_penalty_cap),
             ("learning_potential_coef", self.learning_potential_coef),
@@ -293,11 +505,11 @@ class RewardConfig:
                 raise ValueError(
                     "potential_statistics[delta_goal_scale] must be positive"
                 )
-            if self.single_uav_learning_mode == "loc_goal_v1":
+            if self.single_uav_learning_mode in {"loc_goal_v1", "loc_goal_v2"}:
                 for key in ("delta_u_scale", "delta_goal_scale"):
                     if key not in self.potential_statistics:
                         raise ValueError(
-                            "loc_goal_v1 requires "
+                            "single-UAV goal-progress mode requires "
                             f"potential_statistics[{key}]"
                         )
 
@@ -481,6 +693,8 @@ class MultiUAVJointEnv:
         self._learning_potential = 0.0
         self._previous_position_logdet = 0.0
         self._previous_estimated_goal_distance = 0.0
+        self._single_uav_goal_reached = False
+        self._single_uav_stable_steps = 0
         self._pending_update_feedback: list[dict[str, Any]] = []
         self._last_update_feedback_records: list[dict[str, Any]] = []
 
@@ -557,6 +771,8 @@ class MultiUAVJointEnv:
         self.scenario_metadata = copy.deepcopy(scenario)
         self.timestep = 0
         self._learning_potential = 0.0
+        self._single_uav_goal_reached = False
+        self._single_uav_stable_steps = 0
         lower = np.asarray(self.config.motion.bounds_min_m, dtype=float)
         upper = np.asarray(self.config.motion.bounds_max_m, dtype=float)
         center = (lower + upper) / 2.0
@@ -666,6 +882,14 @@ class MultiUAVJointEnv:
         self.invalid_measurement_action_events = []
         self.measurement_transition_invalidated_events = []
         actions = self._normalize_actions(action)
+        braking_safety_diagnostics: dict[str, dict[str, Any]] = {}
+        if len(self.uav_ids) == 1:
+            for uav_id in self.uav_ids:
+                actions[uav_id], braking_safety_diagnostics[uav_id] = (
+                    self._project_single_uav_braking_action(
+                        uav_id, actions[uav_id]
+                    )
+                )
         self.relative_range_update_events = []
         self.measurement_gate_events = []
         for ekf in self.ekfs.values():
@@ -773,6 +997,12 @@ class MultiUAVJointEnv:
                 execution["safety_projection_reason"] = ";".join(
                     sorted(joint_projection_reasons[uav_id])
                 )
+            execution.update(braking_safety_diagnostics.get(uav_id, {}))
+            if execution.get("braking_safety_projected", False):
+                # Make the effective action's intervention visible in the
+                # existing saturation diagnostic while retaining a dedicated
+                # field for the braking supervisor itself.
+                execution["action_clipped"] = True
             next_states[uav_id] = next_state
             action_info[uav_id] = execution
         self.states = next_states
@@ -1189,12 +1419,18 @@ class MultiUAVJointEnv:
         rewards, reward_info = self._rewards(collision, actions, action_info)
         self.timestep += 1
         collision_terminated = bool(collision)
+        goal_terminated = bool(
+            self.config.reward.single_uav_learning_mode == "loc_goal_v2"
+            and reward_info.get("single_uav_goal_stable", False)
+        )
         time_limit = self.timestep >= self.config.max_steps
-        terminated = collision_terminated
-        truncated = bool(time_limit and not collision_terminated)
+        terminated = bool(collision_terminated or goal_terminated)
+        truncated = bool(time_limit and not terminated)
         termination_reason = (
             "collision"
             if collision_terminated
+            else "goal_reached"
+            if goal_terminated
             else "time_limit"
             if truncated
             else "running"
@@ -1209,9 +1445,18 @@ class MultiUAVJointEnv:
         info["terminated"] = bool(terminated)
         info["truncated"] = bool(truncated)
         info["termination_reason"] = termination_reason
-        info["task_complete"] = False
+        info["task_complete"] = bool(goal_terminated)
         info["safety_projection_enabled"] = bool(self.config.safety_projection_enabled)
         info["safety_execution_mode"] = self.config.safety_execution_mode
+        info["braking_safety_projection_enabled"] = bool(
+            self.config.reward.single_uav_braking_safety_projection_enabled
+        )
+        info["braking_safety_projection_count"] = int(
+            sum(
+                bool(execution.get("braking_safety_projected", False))
+                for execution in action_info.values()
+            )
+        )
         info["pre_projection_collision"] = int(pre_projection_collision)
         info["pre_projection_minimum_clearance"] = float(pre_projection_minimum_clearance)
         pre_pair_conflicts = list(joint_pre_projection.get("uav_pair_conflicts", []))
@@ -1968,6 +2213,58 @@ class MultiUAVJointEnv:
             )
             for uav_id, estimate in estimates.items()
         }
+        braking_features: dict[str, np.ndarray] | None = None
+        if (
+            len(self.uav_ids) == 1
+            and self.config.reward.single_uav_speed_control_mode
+            == "braking_distance"
+        ):
+            braking_features = {}
+            reward_config = self.config.reward
+            max_speed = float(self.config.motion.max_speed_mps)
+            max_stopping_distance = stopping_distance_m(
+                max_speed,
+                reward_config.single_uav_goal_speed_threshold_mps,
+                reward_config.single_uav_braking_acceleration_mps2,
+            )
+            max_stopping_distance = max(max_stopping_distance, 1e-9)
+            for uav_id, estimate in estimates.items():
+                estimate_array = np.asarray(estimate, dtype=float).reshape(-1)
+                distance = float(
+                    np.linalg.norm(
+                        estimate_array[:3] - np.asarray(self.goals[uav_id], dtype=float)
+                    )
+                )
+                speed = float(np.linalg.norm(estimate_array[3:6]))
+                safe_speed = braking_distance_target_speed(
+                    distance,
+                    goal_threshold_m=reward_config.single_uav_goal_threshold_m,
+                    stable_speed_mps=reward_config.single_uav_goal_speed_threshold_mps,
+                    braking_acceleration_mps2=(
+                        reward_config.single_uav_braking_acceleration_mps2
+                    ),
+                    braking_margin_m=reward_config.single_uav_braking_margin_m,
+                    far_target_speed_mps=reward_config.single_uav_target_speed_far_mps,
+                    max_speed_mps=max_speed,
+                )
+                actual_stopping_distance = stopping_distance_m(
+                    speed,
+                    reward_config.single_uav_goal_speed_threshold_mps,
+                    reward_config.single_uav_braking_acceleration_mps2,
+                )
+                brake_margin = float(
+                    distance
+                    - reward_config.single_uav_goal_threshold_m
+                    - reward_config.single_uav_braking_margin_m
+                    - actual_stopping_distance
+                )
+                braking_features[uav_id] = np.asarray(
+                    [
+                        np.clip(safe_speed / max(max_speed, 1e-9), 0.0, 1.0),
+                        np.clip(brake_margin / max_stopping_distance, -1.0, 1.0),
+                    ],
+                    dtype=float,
+                )
         return build_graph_batch(
             self.states,
             estimates,
@@ -1985,6 +2282,7 @@ class MultiUAVJointEnv:
                 }
                 for key, message in self.arrived_messages.items()
             },
+            extra_node_features=braking_features,
         )
 
     def _observations(self) -> dict[str, dict[str, Any]]:
@@ -2058,6 +2356,138 @@ class MultiUAVJointEnv:
                 or next_measurement_time - float(last_update_time) >= period - 1e-9
             )
         return values
+
+    def _project_single_uav_braking_action(
+        self,
+        uav_id: str,
+        action: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Project an unsafe longitudinal command onto the braking envelope.
+
+        This supervisor is deliberately separate from the learned action and
+        from obstacle safety projection. It uses the physical state available
+        to the local low-level controller, predicts one decision window ahead,
+        and intervenes only when the predicted speed would exceed the
+        stopping-distance target or when the UAV is already inside the goal
+        radius. The original policy command remains recoverable from the
+        runner's ``action_raw`` field.
+        """
+
+        default_diagnostics: dict[str, Any] = {
+            "braking_safety_projection_enabled": bool(
+                self.config.reward.single_uav_braking_safety_projection_enabled
+            ),
+            "braking_safety_projected": False,
+            "braking_safety_projection_reason": "",
+            "braking_safety_target_speed_mps": 0.0,
+            "braking_safety_predicted_speed_mps": 0.0,
+            "braking_safety_projection_delta_v": np.zeros(3, dtype=float),
+        }
+        if not (
+            self.config.reward.single_uav_braking_safety_projection_enabled
+            and len(self.uav_ids) == 1
+            and self.config.reward.single_uav_learning_mode == "loc_goal_v2"
+            and self.config.reward.single_uav_speed_control_mode
+            == "braking_distance"
+        ):
+            return dict(action), default_diagnostics
+
+        state = self.states[uav_id]
+        position = np.asarray(state.position_m, dtype=float).reshape(3)
+        velocity = np.asarray(state.velocity_mps, dtype=float).reshape(3)
+        goal = np.asarray(self.goals[uav_id], dtype=float).reshape(3)
+        goal_vector = goal - position
+        distance = float(np.linalg.norm(goal_vector))
+        if not np.isfinite(distance):
+            return dict(action), default_diagnostics
+        max_delta = max(
+            1e-9,
+            float(self.config.motion.max_acceleration_mps2)
+            * float(self.config.motion.dt_s),
+        )
+        commanded_delta = np.asarray(
+            action.get("delta_v", (0.0, 0.0, 0.0)), dtype=float
+        ).reshape(3)
+        commanded_norm = float(np.linalg.norm(commanded_delta))
+        if commanded_norm > max_delta:
+            commanded_delta = commanded_delta * (max_delta / commanded_norm)
+        nominal_velocity = velocity + commanded_delta
+        speed_limit = float(self.config.motion.max_speed_mps)
+        nominal_speed = float(np.linalg.norm(nominal_velocity))
+        if nominal_speed > speed_limit:
+            nominal_velocity *= speed_limit / nominal_speed
+            nominal_speed = speed_limit
+        nominal_position = position + nominal_velocity * float(
+            self.config.motion.dt_s
+        )
+        predicted_distance = float(np.linalg.norm(goal - nominal_position))
+        target_speed = braking_distance_target_speed(
+            distance,
+            goal_threshold_m=self.config.reward.single_uav_goal_threshold_m,
+            stable_speed_mps=self.config.reward.single_uav_goal_speed_threshold_mps,
+            braking_acceleration_mps2=(
+                self.config.reward.single_uav_braking_acceleration_mps2
+            ),
+            braking_margin_m=self.config.reward.single_uav_braking_margin_m,
+            far_target_speed_mps=self.config.reward.single_uav_target_speed_far_mps,
+            max_speed_mps=speed_limit,
+        )
+        predicted_target_speed = braking_distance_target_speed(
+            predicted_distance,
+            goal_threshold_m=self.config.reward.single_uav_goal_threshold_m,
+            stable_speed_mps=self.config.reward.single_uav_goal_speed_threshold_mps,
+            braking_acceleration_mps2=(
+                self.config.reward.single_uav_braking_acceleration_mps2
+            ),
+            braking_margin_m=self.config.reward.single_uav_braking_margin_m,
+            far_target_speed_mps=self.config.reward.single_uav_target_speed_far_mps,
+            max_speed_mps=speed_limit,
+        )
+        safe_target_speed = min(target_speed, predicted_target_speed)
+        distance_inside_goal = distance <= float(
+            self.config.reward.single_uav_goal_threshold_m
+        )
+        overspeed_now = float(np.linalg.norm(velocity)) > target_speed + 1e-4
+        overspeed_predicted = nominal_speed > predicted_target_speed + 1e-4
+        if not (distance_inside_goal or overspeed_now or overspeed_predicted):
+            default_diagnostics.update(
+                {
+                    "braking_safety_target_speed_mps": target_speed,
+                    "braking_safety_predicted_speed_mps": nominal_speed,
+                }
+            )
+            return dict(action), default_diagnostics
+
+        if distance_inside_goal or distance <= float(
+            self.config.reward.single_uav_goal_threshold_m
+        ):
+            desired_velocity = np.zeros(3, dtype=float)
+            reason = "goal_radius_hold"
+        elif distance > 1e-9:
+            desired_velocity = (goal_vector / distance) * safe_target_speed
+            reason = "stopping_distance_overspeed"
+        else:
+            desired_velocity = np.zeros(3, dtype=float)
+            reason = "goal_radius_hold"
+        desired_delta = desired_velocity - velocity
+        desired_delta_norm = float(np.linalg.norm(desired_delta))
+        if desired_delta_norm > max_delta:
+            desired_delta *= max_delta / desired_delta_norm
+        projected_action = dict(action)
+        projected_action["delta_v"] = desired_delta
+        projection_delta = desired_delta - np.asarray(
+            action.get("delta_v", (0.0, 0.0, 0.0)), dtype=float
+        ).reshape(3)
+        default_diagnostics.update(
+            {
+                "braking_safety_projected": True,
+                "braking_safety_projection_reason": reason,
+                "braking_safety_target_speed_mps": target_speed,
+                "braking_safety_predicted_speed_mps": nominal_speed,
+                "braking_safety_projection_delta_v": projection_delta,
+            }
+        )
+        return projected_action, default_diagnostics
 
     def _normalize_actions(self, action: Mapping[str, Any] | Mapping[str, Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
         if "delta_v" in action:
@@ -2519,7 +2949,8 @@ class MultiUAVJointEnv:
         previous_goal_distance = float(self._previous_estimated_goal_distance)
         single_uav_learning_active = bool(
             len(self.uav_ids) == 1
-            and self.config.reward.single_uav_learning_mode == "loc_goal_v1"
+            and self.config.reward.single_uav_learning_mode
+            in {"loc_goal_v1", "loc_goal_v2"}
         )
         single_uav_localization_progress_delta = float(
             previous_position_logdet - current_position_logdet
@@ -2564,7 +2995,7 @@ class MultiUAVJointEnv:
             for required_scale in ("delta_u_scale", "delta_goal_scale"):
                 if required_scale not in potential_statistics:
                     raise RuntimeError(
-                        "loc_goal_v1 requires warm-up-fitted "
+                        "single-UAV goal-progress mode requires warm-up-fitted "
                         f"potential_statistics[{required_scale}]"
                     )
         single_uav_localization_progress_score = float(
@@ -2591,15 +3022,418 @@ class MultiUAVJointEnv:
             single_uav_learning_weights["goal_progress"]
             * single_uav_goal_progress_score
         )
+        single_uav_goal_in_radius = bool(
+            single_uav_learning_active
+            and current_goal_distance <= float(
+                self.config.reward.single_uav_goal_threshold_m
+            )
+        )
+        single_uav_speed_mps = float(
+            np.linalg.norm(
+                self.states[self.uav_ids[0]].velocity_mps
+            )
+            if single_uav_learning_active
+            else 0.0
+        )
+        single_uav_goal_speed_ok = bool(
+            single_uav_learning_active
+            and single_uav_speed_mps
+            <= float(self.config.reward.single_uav_goal_speed_threshold_mps)
+        )
+        single_uav_goal_condition = bool(
+            single_uav_goal_in_radius and single_uav_goal_speed_ok
+        )
+        if (
+            single_uav_learning_active
+            and self.config.reward.single_uav_learning_mode == "loc_goal_v2"
+        ):
+            self._single_uav_stable_steps = (
+                self._single_uav_stable_steps + 1
+                if single_uav_goal_condition
+                else 0
+            )
+        else:
+            self._single_uav_stable_steps = 0
+        if self.config.reward.single_uav_learning_mode == "loc_goal_v2":
+            single_uav_goal_stable = bool(
+                single_uav_goal_condition
+                and self._single_uav_stable_steps
+                >= int(self.config.reward.single_uav_stable_hold_steps)
+            )
+        else:
+            # ``loc_goal_v1`` retains its historical one-step diagnostic.
+            single_uav_goal_stable = single_uav_goal_condition
+        # ``loc_goal_v1`` retains its distance-only diagnostic semantics;
+        # ``loc_goal_v2`` defines success as both proximity and low speed.
+        single_uav_goal_reached = bool(
+            single_uav_goal_stable
+            if self.config.reward.single_uav_learning_mode == "loc_goal_v2"
+            else single_uav_goal_in_radius
+        )
+        single_uav_goal_bonus_triggered = bool(
+            single_uav_learning_active
+            and self.config.reward.single_uav_learning_mode == "loc_goal_v2"
+            and single_uav_goal_stable
+            and not self._single_uav_goal_reached
+        )
+        single_uav_goal_bonus = float(
+            self.config.reward.single_uav_goal_bonus
+            if single_uav_goal_bonus_triggered
+            else 0.0
+        )
+        if single_uav_goal_reached:
+            self._single_uav_goal_reached = True
+        single_uav_localization_cost = float(
+            self.config.reward.single_uav_localization_cost_weight
+            * uncertainty_norm
+            if (
+                single_uav_learning_active
+                and self.config.reward.single_uav_learning_mode == "loc_goal_v2"
+            )
+            else 0.0
+        )
+        single_uav_stopping_distance = float(
+            stopping_distance_m(
+                single_uav_speed_mps,
+                self.config.reward.single_uav_goal_speed_threshold_mps,
+                self.config.reward.single_uav_braking_acceleration_mps2,
+            )
+            if (
+                single_uav_learning_active
+                and self.config.reward.single_uav_learning_mode == "loc_goal_v2"
+            )
+            else 0.0
+        )
+        single_uav_brake_margin = float(
+            current_goal_distance
+            - self.config.reward.single_uav_goal_threshold_m
+            - self.config.reward.single_uav_braking_margin_m
+            - single_uav_stopping_distance
+            if (
+                single_uav_learning_active
+                and self.config.reward.single_uav_learning_mode == "loc_goal_v2"
+            )
+            else 0.0
+        )
+        speed_control_mode = self.config.reward.single_uav_speed_control_mode
+        single_uav_target_speed_mps = float(
+            _distance_target_speed(
+                current_goal_distance,
+                goal_threshold_m=self.config.reward.single_uav_goal_threshold_m,
+                near_goal_radius_m=self.config.reward.single_uav_near_goal_radius_m,
+                stable_speed_mps=self.config.reward.single_uav_goal_speed_threshold_mps,
+                far_target_speed_mps=self.config.reward.single_uav_target_speed_far_mps,
+            )
+            if (
+                single_uav_learning_active
+                and self.config.reward.single_uav_learning_mode == "loc_goal_v2"
+                and speed_control_mode == "distance_target_speed"
+            )
+            else (
+                braking_distance_target_speed(
+                    current_goal_distance,
+                    goal_threshold_m=self.config.reward.single_uav_goal_threshold_m,
+                    stable_speed_mps=self.config.reward.single_uav_goal_speed_threshold_mps,
+                    braking_acceleration_mps2=(
+                        self.config.reward.single_uav_braking_acceleration_mps2
+                    ),
+                    braking_margin_m=self.config.reward.single_uav_braking_margin_m,
+                    far_target_speed_mps=self.config.reward.single_uav_target_speed_far_mps,
+                    max_speed_mps=self.config.motion.max_speed_mps,
+                )
+                if (
+                    single_uav_learning_active
+                    and self.config.reward.single_uav_learning_mode == "loc_goal_v2"
+                    and speed_control_mode == "braking_distance"
+                )
+                else 0.0
+            )
+        )
+        single_uav_speed_excess_mps = float(
+            max(0.0, single_uav_speed_mps - single_uav_target_speed_mps)
+            if (
+                single_uav_learning_active
+                and self.config.reward.single_uav_learning_mode == "loc_goal_v2"
+                and speed_control_mode == "braking_distance"
+            )
+            else (
+                max(0.0, single_uav_speed_mps - single_uav_target_speed_mps)
+                if (
+                    single_uav_learning_active
+                    and self.config.reward.single_uav_learning_mode == "loc_goal_v2"
+                    and speed_control_mode == "distance_target_speed"
+                    and current_goal_distance
+                    <= float(self.config.reward.single_uav_near_goal_radius_m)
+                )
+                else (
+                    single_uav_speed_mps
+                    if (
+                        single_uav_learning_active
+                        and self.config.reward.single_uav_learning_mode == "loc_goal_v2"
+                        and speed_control_mode == "fixed_near_goal"
+                        and current_goal_distance
+                        <= float(self.config.reward.single_uav_near_goal_radius_m)
+                    )
+                    else 0.0
+                )
+            )
+        )
+        single_uav_speed_deficit_mps = float(
+            max(0.0, single_uav_target_speed_mps - single_uav_speed_mps)
+            if (
+                single_uav_learning_active
+                and self.config.reward.single_uav_learning_mode == "loc_goal_v2"
+                and speed_control_mode == "braking_distance"
+            )
+            else 0.0
+        )
+        single_uav_speed_deficit_cost = float(
+            self.config.reward.single_uav_speed_deficit_penalty_weight
+            * single_uav_speed_deficit_mps
+        )
+        single_uav_goal_direction_signal = 0.0
+        if (
+            single_uav_learning_active
+            and self.config.reward.single_uav_learning_mode == "loc_goal_v2"
+            and speed_control_mode == "braking_distance"
+        ):
+            goal_vector = np.asarray(
+                self.goals[self.uav_ids[0]], dtype=float
+            ) - np.asarray(self.ekfs[self.uav_ids[0]].state[:3], dtype=float)
+            goal_norm = float(np.linalg.norm(goal_vector))
+            if goal_norm > float(self.config.reward.potential_epsilon):
+                execution_for_direction = action_execution.get(
+                    self.uav_ids[0], {}
+                )
+                applied_delta_for_direction = np.asarray(
+                    execution_for_direction.get(
+                        "delta_v_applied",
+                        actions[self.uav_ids[0]].get("delta_v", (0.0, 0.0, 0.0)),
+                    ),
+                    dtype=float,
+                ).reshape(3)
+                applied_longitudinal_for_direction = float(
+                    execution_for_direction.get(
+                        "applied_longitudinal_delta_v_mps", 0.0
+                    )
+                )
+                # Do not charge a direction penalty to a brake.  A brake can
+                # point opposite to the goal while still being the correct
+                # action because its purpose is to remove forward speed.
+                if applied_longitudinal_for_direction >= 0.0:
+                    single_uav_goal_direction_signal = float(
+                        np.clip(
+                            np.dot(
+                                applied_delta_for_direction / max_delta,
+                                goal_vector / goal_norm,
+                            ),
+                            -1.0,
+                            1.0,
+                        )
+                    )
+        single_uav_goal_direction_reward = float(
+            self.config.reward.single_uav_goal_direction_coef
+            * single_uav_goal_direction_signal
+        )
+        execution = action_execution.get(self.uav_ids[0], {})
+        pre_speed_for_braking = float(
+            execution.get("pre_speed_mps", single_uav_speed_mps)
+        )
+        post_speed_for_braking = float(
+            execution.get("post_speed_mps", single_uav_speed_mps)
+        )
+        applied_longitudinal_for_braking = float(
+            execution.get("applied_longitudinal_delta_v_mps", 0.0)
+        )
+        braking_action_signal = float(
+            np.clip(
+                max(0.0, -applied_longitudinal_for_braking) / max_delta,
+                0.0,
+                1.0,
+            )
+        )
+        effective_braking_signal = float(
+            np.clip(
+                max(0.0, pre_speed_for_braking - post_speed_for_braking) / max_delta,
+                0.0,
+                1.0,
+            )
+        )
+        braking_need_signal = float(
+            np.clip(
+                (pre_speed_for_braking - single_uav_target_speed_mps)
+                / max(
+                    single_uav_target_speed_mps,
+                    float(self.config.reward.single_uav_goal_speed_threshold_mps),
+                    float(self.config.reward.potential_epsilon),
+                ),
+                0.0,
+                1.0,
+            )
+            if (
+                single_uav_learning_active
+                and self.config.reward.single_uav_learning_mode == "loc_goal_v2"
+                and speed_control_mode == "braking_distance"
+            )
+            else 0.0
+        )
+        single_uav_braking_action_reward = float(
+            self.config.reward.single_uav_braking_action_reward_coef
+            * braking_need_signal
+            * (
+                max(braking_action_signal, effective_braking_signal)
+                - max(
+                    0.0,
+                    applied_longitudinal_for_braking,
+                )
+                / max_delta
+            )
+            if (
+                single_uav_learning_active
+                and self.config.reward.single_uav_learning_mode == "loc_goal_v2"
+                and speed_control_mode == "braking_distance"
+            )
+            else 0.0
+        )
+        single_uav_target_velocity_action_error = 0.0
+        single_uav_target_velocity_action_reward = 0.0
+        if (
+            single_uav_learning_active
+            and self.config.reward.single_uav_learning_mode == "loc_goal_v2"
+            and speed_control_mode == "braking_distance"
+        ):
+            goal_vector_for_tracking = np.asarray(
+                self.goals[self.uav_ids[0]], dtype=float
+            ) - np.asarray(self.ekfs[self.uav_ids[0]].state[:3], dtype=float)
+            goal_norm_for_tracking = float(np.linalg.norm(goal_vector_for_tracking))
+            executed_delta_for_tracking = np.asarray(
+                execution.get(
+                    "delta_v_applied",
+                    actions[self.uav_ids[0]].get("delta_v", (0.0, 0.0, 0.0)),
+                ),
+                dtype=float,
+            ).reshape(3)
+            post_velocity_for_tracking = np.asarray(
+                self.states[self.uav_ids[0]].velocity_mps, dtype=float
+            ).reshape(3)
+            # The environment has already executed the action, so the
+            # previous velocity is reconstructed from the post velocity and
+            # the actually applied increment. This remains valid after an
+            # explicit safety or boundary projection.
+            pre_velocity_for_tracking = (
+                post_velocity_for_tracking - executed_delta_for_tracking
+            )
+            if goal_norm_for_tracking > float(self.config.reward.potential_epsilon):
+                target_velocity_for_tracking = (
+                    goal_vector_for_tracking / goal_norm_for_tracking
+                ) * single_uav_target_speed_mps
+                if current_goal_distance <= float(
+                    self.config.reward.single_uav_goal_threshold_m
+                ):
+                    target_velocity_for_tracking *= min(
+                        1.0,
+                        current_goal_distance
+                        / max(
+                            single_uav_target_speed_mps
+                            * self.config.motion.dt_s,
+                            float(self.config.reward.potential_epsilon),
+                        ),
+                    )
+                desired_delta_for_tracking = (
+                    target_velocity_for_tracking - pre_velocity_for_tracking
+                )
+                desired_delta_norm = float(
+                    np.linalg.norm(desired_delta_for_tracking)
+                )
+                if desired_delta_norm > max_delta:
+                    desired_delta_for_tracking *= max_delta / desired_delta_norm
+                single_uav_target_velocity_action_error = float(
+                    np.clip(
+                        np.linalg.norm(
+                            executed_delta_for_tracking
+                            - desired_delta_for_tracking
+                        )
+                        / max_delta,
+                        0.0,
+                        2.0,
+                    )
+                )
+                single_uav_target_velocity_action_reward = float(
+                    self.config.reward.single_uav_target_velocity_action_reward_coef
+                    * (1.0 - single_uav_target_velocity_action_error)
+                )
+        single_uav_near_goal_speed_cost = float(
+            self.config.reward.single_uav_near_goal_speed_penalty_weight
+            * single_uav_speed_excess_mps
+        )
+        single_uav_goal_progress_reward_scale_m = float(
+            max(
+                self.config.motion.max_speed_mps * self.config.motion.dt_s,
+                self.config.reward.potential_epsilon,
+            )
+            if speed_control_mode == "braking_distance"
+            else 1.0
+        )
+        single_uav_goal_progress_signal = float(
+            np.clip(
+                single_uav_goal_progress_delta
+                / single_uav_goal_progress_reward_scale_m,
+                -1.0,
+                1.0,
+            )
+            if speed_control_mode == "braking_distance"
+            else single_uav_goal_progress_delta
+        )
+        single_uav_goal_progress_reward = float(
+            self.config.reward.single_uav_goal_progress_coef
+            * single_uav_goal_progress_signal
+            if (
+                single_uav_learning_active
+                and self.config.reward.single_uav_learning_mode == "loc_goal_v2"
+            )
+            else 0.0
+        )
+        single_uav_goal_hold_reward = float(
+            self.config.reward.single_uav_goal_hold_reward
+            if (
+                single_uav_learning_active
+                and self.config.reward.single_uav_learning_mode == "loc_goal_v2"
+                and single_uav_goal_condition
+            )
+            else 0.0
+        )
         single_uav_learning_collision_cost = float(
             min(collision_cost, float(self.config.reward.learning_collision_penalty_cap))
         )
-        single_uav_learning_core = float(
-            single_uav_localization_component
-            + single_uav_goal_component
-            - energy_cost
-            - single_uav_learning_collision_cost
-        )
+        if (
+            single_uav_learning_active
+            and self.config.reward.single_uav_learning_mode == "loc_goal_v2"
+        ):
+            # Navigation-oriented single-UAV learning reward:
+            #   dense goal progress + one-shot goal bonus
+            #   + stable-hold credit - localization uncertainty
+            #   - speed excess - collision - energy.
+            single_uav_learning_core = float(
+                single_uav_goal_progress_reward
+                + single_uav_goal_direction_reward
+                + single_uav_braking_action_reward
+                + single_uav_target_velocity_action_reward
+                + single_uav_goal_bonus
+                + single_uav_goal_hold_reward
+                - single_uav_localization_cost
+                - single_uav_near_goal_speed_cost
+                - single_uav_speed_deficit_cost
+                - energy_cost
+                - single_uav_learning_collision_cost
+            )
+        else:
+            # Keep the v1 localization-first channel unchanged.
+            single_uav_learning_core = float(
+                single_uav_localization_component
+                + single_uav_goal_component
+                - energy_cost
+                - single_uav_learning_collision_cost
+            )
         single_uav_learning_reward = float(
             np.clip(
                 single_uav_learning_core,
@@ -2607,6 +3441,31 @@ class MultiUAVJointEnv:
                 float(self.config.reward.learning_reward_clip),
             )
         )
+        # Boundary projection is a local execution event.  Count it once per
+        # UAV and step, irrespective of how many axes were projected.  Keep
+        # this separate from collision and safety projection diagnostics: the
+        # physics layer has already assigned those independent meanings.
+        boundary_penalty_weight = float(
+            self.config.reward.boundary_penalty_weight
+        )
+        boundary_projected_by_uav = {
+            uav_id: bool(
+                action_execution.get(uav_id, {}).get("boundary_projected", False)
+            )
+            for uav_id in self.uav_ids
+        }
+        boundary_reward_by_uav = {
+            uav_id: (
+                -boundary_penalty_weight
+                if boundary_projected_by_uav[uav_id]
+                else 0.0
+            )
+            for uav_id in self.uav_ids
+        }
+        boundary_projection_count = int(
+            sum(boundary_projected_by_uav.values())
+        )
+        boundary_penalty_sum = float(sum(boundary_reward_by_uav.values()))
         actual_measurement_count = int(
             sum(
                 str(actions[uav_id].get("measurement_uav_id", "none")) not in {"none", uav_id}
@@ -2672,17 +3531,11 @@ class MultiUAVJointEnv:
             # historical component-wise collision cap or the bounded-potential
             # clip to this path; otherwise the learning target would no longer
             # be the report objective being tested.
-            learning_reward = float(v3_learning_reward + feedback_reward)
+            base_learning_reward = float(v3_learning_reward + feedback_reward)
         else:
-            learning_reward = float(
-                np.clip(
-                    v3_learning_reward + feedback_reward,
-                    -float(self.config.reward.learning_reward_clip),
-                    float(self.config.reward.learning_reward_clip),
-                )
-            )
+            base_learning_reward = float(v3_learning_reward + feedback_reward)
         if self.config.reward.learning_reward_mode == "report_direct":
-            learning_reward = float(team_reward)
+            base_learning_reward = float(team_reward)
             learning_collision_cost = float(collision_cost)
             potential_shaping = 0.0
         if single_uav_learning_active:
@@ -2690,7 +3543,42 @@ class MultiUAVJointEnv:
             # The reporting reward and physical communication metrics above
             # remain unchanged; no-link communication fallbacks are therefore
             # not charged to this PPO reward.
-            learning_reward = single_uav_learning_reward
+            # Use the unclipped core here so the local boundary term is added
+            # at the same pre-clip stage as the rest of this bounded channel.
+            # With boundary_penalty_weight=0 this is exactly the historical
+            # single_uav_learning_reward path.
+            base_learning_reward = float(single_uav_learning_core)
+
+        learning_reward_preclip_by_uav = {
+            uav_id: float(
+                base_learning_reward + boundary_reward_by_uav[uav_id]
+            )
+            for uav_id in self.uav_ids
+        }
+        # ``report_plus_feedback`` and ``report_direct`` intentionally retain
+        # their unbounded historical learning paths for non-single-UAV runs.
+        # The explicit single-UAV channel has always been clipped, so retain
+        # that bounded contract while inserting the local boundary term
+        # before the clip.
+        if single_uav_learning_active or self.config.reward.learning_reward_mode not in {
+            "report_plus_feedback",
+            "report_direct",
+        }:
+            learning_rewards = {
+                uav_id: float(
+                    np.clip(
+                        learning_reward_preclip_by_uav[uav_id],
+                        -float(self.config.reward.learning_reward_clip),
+                        float(self.config.reward.learning_reward_clip),
+                    )
+                )
+                for uav_id in self.uav_ids
+            }
+        else:
+            learning_rewards = dict(learning_reward_preclip_by_uav)
+        learning_reward = float(
+            np.mean(list(learning_rewards.values())) if learning_rewards else 0.0
+        )
         self._learning_potential = potential_for_shaping
         reward_components = {
             uav_id: {
@@ -2702,9 +3590,12 @@ class MultiUAVJointEnv:
         }
         return rewards, {
             "reporting_rewards": dict(rewards),
-            "learning_rewards": {
-                uav_id: float(learning_reward) for uav_id in self.uav_ids
-            },
+            "learning_rewards": dict(learning_rewards),
+            "boundary_reward": float(boundary_penalty_sum),
+            "boundary_reward_by_uav": dict(boundary_reward_by_uav),
+            "boundary_projected_by_uav": dict(boundary_projected_by_uav),
+            "boundary_projection_count": int(boundary_projection_count),
+            "boundary_penalty_sum": float(boundary_penalty_sum),
             "learning_potential": float(reporting_potential),
             "learning_progress_potential": float(progress_potential),
             "learning_progress_logdet_uncertainty": float(progress_uncertainty_logdet),
@@ -2714,11 +3605,39 @@ class MultiUAVJointEnv:
                 self.config.reward.single_uav_learning_mode
             ),
             "single_uav_learning_active": bool(single_uav_learning_active),
+            "single_uav_goal_reached": bool(single_uav_goal_reached),
+            "single_uav_goal_in_radius": bool(single_uav_goal_in_radius),
+            "single_uav_goal_speed_ok": bool(single_uav_goal_speed_ok),
+            "single_uav_goal_stable": bool(single_uav_goal_stable),
+            "single_uav_goal_condition": bool(single_uav_goal_condition),
+            "single_uav_stable_steps": int(self._single_uav_stable_steps),
+            "single_uav_stable_hold_steps": int(
+                self.config.reward.single_uav_stable_hold_steps
+            ),
+            "single_uav_goal_bonus_triggered": bool(
+                single_uav_goal_bonus_triggered
+            ),
             "learning_reward_components": {
                 "mode": self.config.reward.learning_reward_mode,
                 "reporting_reward": float(team_reward),
                 "reporting_reward_total": float(team_reward),
                 "learning_reward_total": float(learning_reward),
+                "base_learning_reward": float(base_learning_reward),
+                "learning_reward_preclip": float(
+                    np.mean(list(learning_reward_preclip_by_uav.values()))
+                    if learning_reward_preclip_by_uav
+                    else 0.0
+                ),
+                "learning_reward_preclip_by_uav": dict(
+                    learning_reward_preclip_by_uav
+                ),
+                "learning_reward_total_by_uav": dict(learning_rewards),
+                "boundary_penalty_weight": float(boundary_penalty_weight),
+                "boundary_reward": float(boundary_penalty_sum),
+                "boundary_reward_by_uav": dict(boundary_reward_by_uav),
+                "boundary_projected_by_uav": dict(boundary_projected_by_uav),
+                "boundary_projection_count": int(boundary_projection_count),
+                "boundary_penalty_sum": float(boundary_penalty_sum),
                 "bounded_reward": float(bounded_learning_reward),
                 "potential": float(reporting_potential),
                 "progress_potential": float(progress_potential),
@@ -2755,11 +3674,119 @@ class MultiUAVJointEnv:
                 "goal_progress_scale": float(single_uav_goal_progress_scale),
                 "goal_progress_score": float(single_uav_goal_progress_score),
                 "single_uav_goal_component": float(single_uav_goal_component),
+                "single_uav_goal_progress_reward": float(
+                    single_uav_goal_progress_reward
+                ),
+                "single_uav_goal_progress_signal": float(
+                    single_uav_goal_progress_signal
+                ),
+                "single_uav_goal_progress_reward_scale_m": float(
+                    single_uav_goal_progress_reward_scale_m
+                ),
+                "single_uav_goal_bonus": float(single_uav_goal_bonus),
+                "single_uav_goal_hold_reward": float(single_uav_goal_hold_reward),
+                "single_uav_goal_bonus_triggered": bool(
+                    single_uav_goal_bonus_triggered
+                ),
+                "single_uav_goal_reached": bool(single_uav_goal_reached),
+                "single_uav_goal_in_radius": bool(single_uav_goal_in_radius),
+                "single_uav_goal_speed_ok": bool(single_uav_goal_speed_ok),
+                "single_uav_goal_stable": bool(single_uav_goal_stable),
+                "single_uav_goal_condition": bool(single_uav_goal_condition),
+                "single_uav_stable_steps": int(self._single_uav_stable_steps),
+                "single_uav_stable_hold_steps": int(
+                    self.config.reward.single_uav_stable_hold_steps
+                ),
+                "single_uav_goal_threshold_m": float(
+                    self.config.reward.single_uav_goal_threshold_m
+                ),
+                "single_uav_speed_mps": float(single_uav_speed_mps),
+                "single_uav_goal_speed_threshold_mps": float(
+                    self.config.reward.single_uav_goal_speed_threshold_mps
+                ),
+                "single_uav_near_goal_radius_m": float(
+                    self.config.reward.single_uav_near_goal_radius_m
+                ),
+                "single_uav_speed_control_mode": str(
+                    self.config.reward.single_uav_speed_control_mode
+                ),
+                "single_uav_target_speed_far_mps": float(
+                    self.config.reward.single_uav_target_speed_far_mps
+                ),
+                 "single_uav_target_speed_mps": float(
+                     single_uav_target_speed_mps
+                 ),
+                 "single_uav_goal_direction_signal": float(
+                     single_uav_goal_direction_signal
+                 ),
+                 "single_uav_goal_direction_coef": float(
+                     self.config.reward.single_uav_goal_direction_coef
+                 ),
+                 "single_uav_goal_direction_reward": float(
+                     single_uav_goal_direction_reward
+                 ),
+                 "single_uav_braking_need_signal": float(braking_need_signal),
+                 "single_uav_braking_action_signal": float(braking_action_signal),
+                 "single_uav_effective_braking_signal": float(
+                     effective_braking_signal
+                 ),
+                 "single_uav_braking_action_reward": float(
+                     single_uav_braking_action_reward
+                 ),
+                 "single_uav_braking_action_reward_coef": float(
+                     self.config.reward.single_uav_braking_action_reward_coef
+                 ),
+                 "single_uav_target_velocity_action_error": float(
+                     single_uav_target_velocity_action_error
+                 ),
+                 "single_uav_target_velocity_action_reward": float(
+                     single_uav_target_velocity_action_reward
+                 ),
+                 "single_uav_target_velocity_action_reward_coef": float(
+                     self.config.reward.single_uav_target_velocity_action_reward_coef
+                 ),
+                 "single_uav_stopping_distance_m": float(
+                     single_uav_stopping_distance
+                 ),
+                "single_uav_brake_margin_m": float(single_uav_brake_margin),
+                "single_uav_braking_acceleration_mps2": float(
+                    self.config.reward.single_uav_braking_acceleration_mps2
+                ),
+                "single_uav_braking_margin_m": float(
+                    self.config.reward.single_uav_braking_margin_m
+                ),
+                 "single_uav_speed_excess_mps": float(
+                     single_uav_speed_excess_mps
+                 ),
+                 "single_uav_speed_deficit_mps": float(
+                     single_uav_speed_deficit_mps
+                 ),
+                 "single_uav_speed_deficit_cost": float(
+                     single_uav_speed_deficit_cost
+                 ),
+                 "single_uav_speed_deficit_penalty_weight": float(
+                     self.config.reward.single_uav_speed_deficit_penalty_weight
+                 ),
+                 "single_uav_near_goal_speed_cost": float(
+                     single_uav_near_goal_speed_cost
+                 ),
+                "single_uav_near_goal_speed_penalty_weight": float(
+                    self.config.reward.single_uav_near_goal_speed_penalty_weight
+                ),
+                "single_uav_localization_cost": float(
+                    single_uav_localization_cost
+                ),
+                "single_uav_localization_cost_weight": float(
+                    self.config.reward.single_uav_localization_cost_weight
+                ),
                 "single_uav_learning_energy_cost": float(energy_cost),
                 "single_uav_learning_collision_cost": float(
                     single_uav_learning_collision_cost
                 ),
                 "single_uav_learning_core": float(single_uav_learning_core),
+                "single_uav_learning_reward_preclip": float(
+                    single_uav_learning_core
+                ),
                 "single_uav_learning_reward": float(single_uav_learning_reward),
                 "learning_feedback_mode": feedback_mode,
                 "v3_learning_reward": float(v3_learning_reward),

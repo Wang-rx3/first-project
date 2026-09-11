@@ -99,12 +99,22 @@ def build_graph_batch(
     local_obstacle_features: dict[str, np.ndarray],
     snapshot: TopologySnapshot,
     visible_messages: Mapping[tuple[str, str], Mapping[str, Any]] | None = None,
+    extra_node_features: Mapping[str, np.ndarray] | None = None,
 ) -> GraphBatch:
     """Build actor-visible local observations and critic-compatible tensors."""
 
     ids = sorted(states)
     index = {uav_id: position for position, uav_id in enumerate(ids)}
     visible_messages = visible_messages or {}
+    extra_node_features = extra_node_features or {}
+    extra_vectors = {
+        str(uav_id): np.asarray(features, dtype=float).reshape(-1)
+        for uav_id, features in extra_node_features.items()
+    }
+    extra_dimensions = {int(features.size) for features in extra_vectors.values()}
+    if len(extra_dimensions) > 1:
+        raise ValueError("all extra node feature vectors must have the same dimension")
+    extra_feature_dim = next(iter(extra_dimensions), 0)
     obstacle_vectors = {
         str(uav_id): np.asarray(features, dtype=float).reshape(-1)
         for uav_id, features in local_obstacle_features.items()
@@ -128,7 +138,16 @@ def build_graph_batch(
     def node_row(uav_id: str, estimate: np.ndarray, covariance: np.ndarray) -> np.ndarray:
         goal_delta = np.asarray(goals[uav_id], dtype=float) - np.asarray(estimate, dtype=float)[:3]
         obstacle = obstacle_vectors.get(uav_id, np.zeros(obstacle_feature_dim, dtype=float))
-        return np.concatenate([np.asarray(estimate, dtype=float), np.diag(np.asarray(covariance, dtype=float)), goal_delta, obstacle])
+        extra = extra_vectors.get(uav_id, np.zeros(extra_feature_dim, dtype=float))
+        return np.concatenate(
+            [
+                np.asarray(estimate, dtype=float),
+                np.diag(np.asarray(covariance, dtype=float)),
+                goal_delta,
+                obstacle,
+                extra,
+            ]
+        )
 
     node_rows: list[np.ndarray] = []
     for uav_id in ids:

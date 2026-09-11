@@ -237,6 +237,33 @@ def _reward_series(
                 "goal_progress_score": _mean(
                     row.get("goal_progress_score") for row in rows
                 ),
+                "goal_progress_reward": _mean(
+                    row.get("single_uav_goal_progress_reward") for row in rows
+                ),
+                "goal_bonus": _mean(
+                    row.get("single_uav_goal_bonus") for row in rows
+                ),
+                "localization_cost": _mean(
+                    row.get("single_uav_localization_cost") for row in rows
+                ),
+                "goal_reached": _mean(
+                    row.get("single_uav_goal_reached") for row in rows
+                ),
+                "goal_in_radius": _mean(
+                    row.get("single_uav_goal_in_radius") for row in rows
+                ),
+                "goal_speed_ok": _mean(
+                    row.get("single_uav_goal_speed_ok") for row in rows
+                ),
+                "goal_stable": _mean(
+                    row.get("single_uav_goal_stable") for row in rows
+                ),
+                "speed_mps": _mean(
+                    row.get("single_uav_speed_mps") for row in rows
+                ),
+                "near_goal_speed_cost": _mean(
+                    row.get("single_uav_near_goal_speed_cost") for row in rows
+                ),
                 "goal_distance": _mean(
                     row.get("current_goal_distance") for row in rows
                 ),

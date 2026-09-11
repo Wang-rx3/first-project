@@ -156,12 +156,158 @@ def _build_parser() -> argparse.ArgumentParser:
     preliminary_parser.add_argument("--initial-delta-std", type=float, default=0.20)
     preliminary_parser.add_argument(
         "--single-uav-learning-mode",
-        choices=("off", "loc_goal_v1"),
+        choices=("off", "loc_goal_v1", "loc_goal_v2"),
         default="off",
         help=(
             "single-UAV PPO reward channel; loc_goal_v1 uses warm-up-fitted "
-            "EKF localization and goal-progress signals"
+            "EKF localization and goal-progress signals; loc_goal_v2 adds "
+            "dense navigation progress, near-goal speed braking, and a "
+            "one-shot stable-arrival bonus"
         ),
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-goal-progress-coef",
+        type=float,
+        default=1.0,
+        help="loc_goal_v2 dense estimated goal-progress coefficient",
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-localization-cost-weight",
+        type=float,
+        default=0.2,
+        help="loc_goal_v2 bounded localization-uncertainty cost weight",
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-goal-bonus",
+        type=float,
+        default=5.0,
+        help="loc_goal_v2 one-shot stable-arrival goal bonus",
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-goal-threshold-m",
+        type=float,
+        default=1.0,
+        help="loc_goal_v2 estimated goal-arrival radius in metres",
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-goal-speed-threshold-mps",
+        type=float,
+        default=0.5,
+        help="loc_goal_v2 maximum speed for stable goal arrival (m/s)",
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-near-goal-radius-m",
+        type=float,
+        default=5.0,
+        help="loc_goal_v2 radius where near-goal speed cost activates (m)",
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-near-goal-speed-penalty-weight",
+        type=float,
+        default=0.1,
+        help="loc_goal_v2 near-goal speed cost weight",
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-speed-control-mode",
+        choices=("fixed_near_goal", "distance_target_speed", "braking_distance"),
+        default="fixed_near_goal",
+        help=(
+            "loc_goal_v2 speed shaping; distance_target_speed uses a linear "
+            "target and braking_distance uses a stopping-distance target"
+        ),
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-target-speed-far-mps",
+        type=float,
+        default=6.0,
+        help=(
+            "loc_goal_v2 cruise target speed outside the near-goal boundary "
+            "for distance_target_speed mode"
+        ),
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-braking-acceleration-mps2",
+        type=float,
+        default=2.0,
+        help="conservative deceleration used by braking_distance target-speed shaping",
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-braking-margin-m",
+        type=float,
+        default=2.0,
+        help="extra distance kept outside the goal radius for braking",
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-stable-hold-steps",
+        type=int,
+        default=1,
+        help="consecutive in-radius low-speed steps required for stable arrival",
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-goal-hold-reward",
+        type=float,
+        default=0.0,
+        help="optional per-step reward while the UAV satisfies the stable goal condition",
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-speed-deficit-penalty-weight",
+        type=float,
+        default=0.05,
+        help="braking_distance two-sided speed-tracking penalty for flying below the admissible target speed",
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-goal-direction-coef",
+        type=float,
+        default=0.75,
+        help="braking_distance executed-acceleration alignment reward coefficient",
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-braking-action-reward-coef",
+        type=float,
+        default=1.0,
+        help="braking_distance reward coefficient for effective negative longitudinal acceleration when overspeeding",
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-target-velocity-action-reward-coef",
+        type=float,
+        default=0.0,
+        help=(
+            "braking_distance action-shaping coefficient for matching the "
+            "executed delta-v to the distance-aware goal velocity"
+        ),
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-braking-curriculum-fraction",
+        type=float,
+        default=0.0,
+        help=(
+            "training-only fraction that starts the UAV at 3/5/8 m from the goal "
+            "with a controlled forward speed; validation/test keep the original start"
+        ),
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-braking-safety-projection",
+        action="store_true",
+        default=False,
+        help=(
+            "enable a transparent low-level braking supervisor that projects "
+            "unsafe single-UAV velocity increments onto the stopping-distance envelope"
+        ),
+    )
+    preliminary_parser.add_argument(
+        "--boundary-penalty-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "training-only per-UAV penalty for one boundary projection in a "
+            "step; 0 preserves the historical learning reward"
+        ),
+    )
+    preliminary_parser.add_argument(
+        "--learning-reward-clip",
+        type=float,
+        default=1.0,
+        help="clip magnitude for the PPO learning reward; increase only for controlled reward-shape experiments",
     )
     preliminary_parser.add_argument(
         "--ekf-config",
@@ -2670,6 +2816,33 @@ def _build_parser() -> argparse.ArgumentParser:
         help="allow writing into a non-empty diagnostic output directory",
     )
 
+    single_uav_analysis_parser = subparsers.add_parser(
+        "analyze-single-uav-navigation",
+        help="quantify goal-region entry, near-goal speed, and speed-distance behavior across one-UAV episodes",
+    )
+    single_uav_analysis_parser.add_argument(
+        "scale",
+        type=Path,
+        help="scale_1 directory containing train/validation/test episode directories",
+    )
+    single_uav_analysis_parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="analysis plot output directory; defaults beside the experiment plots",
+    )
+    single_uav_analysis_parser.add_argument(
+        "--metrics-output",
+        type=Path,
+        default=None,
+        help="cross-episode CSV output path; defaults beside the experiment logs",
+    )
+    single_uav_analysis_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="allow writing into a non-empty analysis output directory",
+    )
+
     preliminary_validate_parser = subparsers.add_parser(
         "validate-preliminary",
         help="validate every preliminary scale directory",
@@ -3012,6 +3185,37 @@ def main(argv: Sequence[str] | None = None) -> int:
             entropy_coef=args.entropy_coef,
             initial_delta_std=args.initial_delta_std,
             single_uav_learning_mode=args.single_uav_learning_mode,
+            single_uav_goal_progress_coef=args.single_uav_goal_progress_coef,
+            single_uav_localization_cost_weight=args.single_uav_localization_cost_weight,
+            single_uav_goal_bonus=args.single_uav_goal_bonus,
+            single_uav_goal_threshold_m=args.single_uav_goal_threshold_m,
+            single_uav_goal_speed_threshold_mps=args.single_uav_goal_speed_threshold_mps,
+            single_uav_near_goal_radius_m=args.single_uav_near_goal_radius_m,
+            single_uav_near_goal_speed_penalty_weight=(
+                args.single_uav_near_goal_speed_penalty_weight
+            ),
+            single_uav_speed_control_mode=args.single_uav_speed_control_mode,
+            single_uav_target_speed_far_mps=args.single_uav_target_speed_far_mps,
+            single_uav_braking_acceleration_mps2=(
+                args.single_uav_braking_acceleration_mps2
+            ),
+            single_uav_braking_margin_m=args.single_uav_braking_margin_m,
+            single_uav_stable_hold_steps=args.single_uav_stable_hold_steps,
+            single_uav_goal_hold_reward=args.single_uav_goal_hold_reward,
+            single_uav_speed_deficit_penalty_weight=args.single_uav_speed_deficit_penalty_weight,
+            single_uav_goal_direction_coef=args.single_uav_goal_direction_coef,
+            single_uav_braking_action_reward_coef=args.single_uav_braking_action_reward_coef,
+            single_uav_target_velocity_action_reward_coef=(
+                args.single_uav_target_velocity_action_reward_coef
+            ),
+            single_uav_braking_curriculum_fraction=(
+                args.single_uav_braking_curriculum_fraction
+            ),
+            single_uav_braking_safety_projection_enabled=(
+                args.single_uav_braking_safety_projection
+            ),
+            boundary_penalty_weight=args.boundary_penalty_weight,
+            learning_reward_clip=args.learning_reward_clip,
             vo_position_std_m=ekf_parameters["vo_position_std_m"],
             process_position_std_m=ekf_parameters["process_position_std_m"],
             process_velocity_std_mps=ekf_parameters["process_velocity_std_mps"],
@@ -4415,6 +4619,38 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
         print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "analyze-single-uav-navigation":
+        from .experiments.single_uav_navigation_analysis import (
+            analyze_single_uav_navigation,
+        )
+
+        scale_path = Path(args.scale)
+        if args.output is None:
+            experiment_root = scale_path.parent
+            output_dir = (
+                Path("plots/preliminary")
+                / experiment_root.name
+                / "single_uav_navigation_analysis"
+            )
+        else:
+            output_dir = args.output
+        if args.metrics_output is None:
+            experiment_root = scale_path.parent
+            metrics_output = (
+                Path("logs/preliminary")
+                / experiment_root.name
+                / "single_uav_navigation_analysis.csv"
+            )
+        else:
+            metrics_output = args.metrics_output
+        summary = analyze_single_uav_navigation(
+            scale_path,
+            output_dir=output_dir,
+            metrics_output_path=metrics_output,
+            force=args.force,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
         return 0
     if args.command == "validate-preliminary":
         from .experiments.formal import validate_preliminary

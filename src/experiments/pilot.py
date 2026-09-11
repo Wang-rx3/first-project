@@ -384,6 +384,8 @@ class _EpisodeTraceWriter:
         self.action_saturation_values: list[float] = []
         self.safety_projection_count = 0
         self.boundary_projection_count = 0
+        self.boundary_penalty_sum = 0.0
+        self.braking_safety_projection_count = 0
         self.minimum_clearances: list[float] = []
         self.pre_projection_minimum_clearances: list[float] = []
         self.collision_types: set[str] = set()
@@ -427,6 +429,7 @@ class _EpisodeTraceWriter:
         if learning_rewards is None:
             learning_rewards = rewards
         self.step_count = max(self.step_count, int(step) + 1)
+        self.boundary_penalty_sum += float(info.get("boundary_penalty_sum", 0.0))
         self.terminated = bool(terminated)
         self.truncated = bool(truncated)
         self.termination_reason = str(info.get("termination_reason", "running"))
@@ -657,6 +660,7 @@ class _EpisodeTraceWriter:
             )
             if not isinstance(action_diagnostics, Mapping):
                 action_diagnostics = {}
+            execution = info["action_execution"][uav_id]
             self.rows["actions"].append(
                 {
                     **common,
@@ -707,26 +711,93 @@ class _EpisodeTraceWriter:
                     "applied_window_end": _round(timestamp),
                     "action_raw": json.dumps(_jsonable(raw_action), ensure_ascii=False, sort_keys=True),
                     "action_applied": json.dumps(_jsonable(applied_action), ensure_ascii=False, sort_keys=True),
-                    "action_clipped": int(info["action_execution"][uav_id]["action_clipped"]),
-                    "safety_projected": int(info["action_execution"][uav_id].get("safety_projected", False)),
-                    "boundary_projected": int(info["action_execution"][uav_id].get("boundary_projected", False)),
+                    "action_clipped": int(execution["action_clipped"]),
+                    "pre_speed_mps": _round(execution.get("pre_speed_mps", 0.0)),
+                    "post_speed_mps": _round(execution.get("post_speed_mps", 0.0)),
+                    "speed_change_mps": _round(execution.get("speed_change_mps", 0.0)),
+                    "speed_reduction_mps": _round(execution.get("speed_reduction_mps", 0.0)),
+                    "delta_v_commanded_norm_mps": _round(
+                        execution.get("delta_v_commanded_norm_mps", 0.0)
+                    ),
+                    "delta_v_applied_norm_mps": _round(
+                        execution.get("delta_v_applied_norm_mps", 0.0)
+                    ),
+                    "commanded_longitudinal_delta_v_mps": _round(
+                        execution.get("commanded_longitudinal_delta_v_mps", 0.0)
+                    ),
+                    "applied_longitudinal_delta_v_mps": _round(
+                        execution.get("applied_longitudinal_delta_v_mps", 0.0)
+                    ),
+                    "commanded_braking_delta_v_mps": _round(
+                        execution.get("commanded_braking_delta_v_mps", 0.0)
+                    ),
+                    "braking_delta_v_mps": _round(
+                        execution.get("braking_delta_v_mps", 0.0)
+                    ),
+                    "braking_action": int(execution.get("braking_action", 0)),
+                    "brake_effective": int(execution.get("brake_effective", 0)),
+                    "brake_execution_loss_mps": _round(
+                        execution.get("brake_execution_loss_mps", 0.0)
+                    ),
+                    "brake_blocked": int(execution.get("brake_blocked", 0)),
+                    "speed_limit_limited": int(
+                        execution.get("speed_limit_limited", 0)
+                    ),
+                    "safety_projected": int(execution.get("safety_projected", False)),
+                    "boundary_projected": int(execution.get("boundary_projected", False)),
+                    "braking_safety_projection_enabled": int(
+                        execution.get("braking_safety_projection_enabled", False)
+                    ),
+                    "braking_safety_projected": int(
+                        execution.get("braking_safety_projected", False)
+                    ),
+                    "braking_safety_projection_reason": str(
+                        execution.get("braking_safety_projection_reason", "")
+                    ),
+                    "braking_safety_target_speed_mps": _round(
+                        execution.get("braking_safety_target_speed_mps", 0.0)
+                    ),
+                    "braking_safety_predicted_speed_mps": _round(
+                        execution.get("braking_safety_predicted_speed_mps", 0.0)
+                    ),
+                    "braking_safety_projection_delta_v_json": json.dumps(
+                        _jsonable(
+                            execution.get(
+                                "braking_safety_projection_delta_v", (0.0, 0.0, 0.0)
+                            )
+                        ),
+                        ensure_ascii=False,
+                    ),
                     "policy_source": policy_source,
                 }
             )
             self.safety_projection_count += int(
-                bool(info["action_execution"][uav_id].get("safety_projected", False))
+                bool(execution.get("safety_projected", False))
             )
             self.boundary_projection_count += int(
-                bool(info["action_execution"][uav_id].get("boundary_projected", False))
+                bool(execution.get("boundary_projected", False))
+            )
+            self.braking_safety_projection_count += int(
+                bool(execution.get("braking_safety_projected", False))
             )
             self.action_saturation_values.append(
-                float(bool(info["action_execution"][uav_id].get("action_clipped", False)))
+                float(bool(execution.get("action_clipped", False)))
             )
             global_metrics = info["global_metrics"]
             covariance_position = np.asarray(covariance[:3, :3])
             learning_components = info.get("learning_reward_components", {})
             if not isinstance(learning_components, Mapping):
                 learning_components = {}
+            boundary_rewards = learning_components.get(
+                "boundary_reward_by_uav", info.get("boundary_reward_by_uav", {})
+            )
+            if not isinstance(boundary_rewards, Mapping):
+                boundary_rewards = {}
+            learning_reward_preclip = learning_components.get(
+                "learning_reward_preclip_by_uav", {}
+            )
+            if not isinstance(learning_reward_preclip, Mapping):
+                learning_reward_preclip = {}
             self.rows["rewards"].append(
                 {
                     **common,
@@ -734,6 +805,25 @@ class _EpisodeTraceWriter:
                     "uav_id": uav_id,
                     "reward_total": _round(rewards[uav_id]),
                     "learning_reward_total": _round(learning_rewards[uav_id]),
+                    "base_learning_reward": _round(
+                        learning_components.get(
+                            "base_learning_reward", learning_rewards[uav_id]
+                        )
+                    ),
+                    "boundary_reward": _round(
+                        boundary_rewards.get(uav_id, info.get("boundary_reward", 0.0))
+                    ),
+                    "boundary_projected": int(
+                        bool(execution.get("boundary_projected", False))
+                    ),
+                    "boundary_projection_count": int(
+                        info.get("boundary_projection_count", 0)
+                    ),
+                    "learning_reward_preclip": _round(
+                        learning_reward_preclip.get(
+                            uav_id, learning_rewards[uav_id]
+                        )
+                    ),
                     "learning_reward_mode": info.get("learning_reward_mode", "legacy"),
                     "single_uav_learning_mode": learning_components.get(
                         "single_uav_learning_mode",
@@ -830,6 +920,149 @@ class _EpisodeTraceWriter:
                     "single_uav_goal_component": _round(
                         learning_components.get("single_uav_goal_component", 0.0)
                     ),
+                    "single_uav_goal_progress_reward": _round(
+                        learning_components.get(
+                            "single_uav_goal_progress_reward", 0.0
+                        )
+                    ),
+                    "single_uav_goal_bonus": _round(
+                        learning_components.get("single_uav_goal_bonus", 0.0)
+                    ),
+                    "single_uav_goal_bonus_triggered": int(
+                        bool(
+                            learning_components.get(
+                                "single_uav_goal_bonus_triggered", False
+                            )
+                        )
+                    ),
+                    "single_uav_goal_reached": int(
+                        bool(
+                            learning_components.get(
+                                "single_uav_goal_reached", False
+                            )
+                        )
+                    ),
+                    "single_uav_goal_in_radius": int(
+                        bool(
+                            learning_components.get(
+                                "single_uav_goal_in_radius", False
+                            )
+                        )
+                    ),
+                    "single_uav_goal_speed_ok": int(
+                        bool(
+                            learning_components.get(
+                                "single_uav_goal_speed_ok", False
+                            )
+                        )
+                    ),
+                    "single_uav_goal_stable": int(
+                        bool(
+                            learning_components.get(
+                                "single_uav_goal_stable", False
+                            )
+                        )
+                    ),
+                    "single_uav_goal_condition": int(
+                        bool(
+                            learning_components.get(
+                                "single_uav_goal_condition", False
+                            )
+                        )
+                    ),
+                    "single_uav_stable_steps": int(
+                        learning_components.get("single_uav_stable_steps", 0)
+                    ),
+                    "single_uav_stable_hold_steps": int(
+                        learning_components.get("single_uav_stable_hold_steps", 1)
+                    ),
+                    "single_uav_goal_threshold_m": _round(
+                        learning_components.get(
+                            "single_uav_goal_threshold_m", 0.0
+                        )
+                    ),
+                    "single_uav_speed_mps": _round(
+                        learning_components.get("single_uav_speed_mps", 0.0)
+                    ),
+                    "single_uav_goal_speed_threshold_mps": _round(
+                        learning_components.get(
+                            "single_uav_goal_speed_threshold_mps", 0.0
+                        )
+                    ),
+                    "single_uav_near_goal_radius_m": _round(
+                        learning_components.get(
+                            "single_uav_near_goal_radius_m", 0.0
+                        )
+                    ),
+                    "single_uav_speed_control_mode": learning_components.get(
+                        "single_uav_speed_control_mode", "fixed_near_goal"
+                    ),
+                    "single_uav_target_speed_far_mps": _round(
+                        learning_components.get(
+                            "single_uav_target_speed_far_mps", 0.0
+                        )
+                    ),
+                    "single_uav_target_speed_mps": _round(
+                        learning_components.get(
+                            "single_uav_target_speed_mps", 0.0
+                        )
+                    ),
+                    "single_uav_stopping_distance_m": _round(
+                        learning_components.get(
+                            "single_uav_stopping_distance_m", 0.0
+                        )
+                    ),
+                    "single_uav_brake_margin_m": _round(
+                        learning_components.get("single_uav_brake_margin_m", 0.0)
+                    ),
+                    "single_uav_braking_acceleration_mps2": _round(
+                        learning_components.get(
+                            "single_uav_braking_acceleration_mps2", 0.0
+                        )
+                    ),
+                    "single_uav_braking_margin_m": _round(
+                        learning_components.get("single_uav_braking_margin_m", 0.0)
+                    ),
+                    "single_uav_speed_excess_mps": _round(
+                        learning_components.get(
+                            "single_uav_speed_excess_mps", 0.0
+                        )
+                    ),
+                    "single_uav_speed_deficit_mps": _round(
+                        learning_components.get(
+                            "single_uav_speed_deficit_mps", 0.0
+                        )
+                    ),
+                    "single_uav_speed_deficit_cost": _round(
+                        learning_components.get(
+                            "single_uav_speed_deficit_cost", 0.0
+                        )
+                    ),
+                    "single_uav_speed_deficit_penalty_weight": _round(
+                        learning_components.get(
+                            "single_uav_speed_deficit_penalty_weight", 0.0
+                        )
+                    ),
+                    "single_uav_near_goal_speed_cost": _round(
+                        learning_components.get(
+                            "single_uav_near_goal_speed_cost", 0.0
+                        )
+                    ),
+                    "single_uav_near_goal_speed_penalty_weight": _round(
+                        learning_components.get(
+                            "single_uav_near_goal_speed_penalty_weight", 0.0
+                        )
+                    ),
+                    "single_uav_localization_cost": _round(
+                        learning_components.get(
+                            "single_uav_localization_cost", 0.0
+                        )
+                    ),
+                    "single_uav_localization_cost_weight": _round(
+                        learning_components.get(
+                            "single_uav_localization_cost_weight", 0.0
+                        )
+                    ),
                     "single_uav_learning_energy_cost": _round(
                         learning_components.get("single_uav_learning_energy_cost", 0.0)
                     ),
@@ -838,8 +1071,81 @@ class _EpisodeTraceWriter:
                             "single_uav_learning_collision_cost", 0.0
                         )
                     ),
+                    "single_uav_goal_progress_signal": _round(
+                        learning_components.get(
+                            "single_uav_goal_progress_signal", 0.0
+                        )
+                    ),
+                    "single_uav_goal_progress_reward_scale_m": _round(
+                        learning_components.get(
+                            "single_uav_goal_progress_reward_scale_m", 0.0
+                        )
+                    ),
+                    "single_uav_goal_hold_reward": _round(
+                        learning_components.get("single_uav_goal_hold_reward", 0.0)
+                    ),
+                    "single_uav_goal_direction_signal": _round(
+                        learning_components.get(
+                            "single_uav_goal_direction_signal", 0.0
+                        )
+                    ),
+                    "single_uav_goal_direction_coef": _round(
+                        learning_components.get(
+                            "single_uav_goal_direction_coef", 0.0
+                        )
+                    ),
+                    "single_uav_goal_direction_reward": _round(
+                        learning_components.get(
+                            "single_uav_goal_direction_reward", 0.0
+                        )
+                    ),
+                    "single_uav_braking_need_signal": _round(
+                        learning_components.get(
+                            "single_uav_braking_need_signal", 0.0
+                        )
+                    ),
+                    "single_uav_braking_action_signal": _round(
+                        learning_components.get(
+                            "single_uav_braking_action_signal", 0.0
+                        )
+                    ),
+                    "single_uav_effective_braking_signal": _round(
+                        learning_components.get(
+                            "single_uav_effective_braking_signal", 0.0
+                        )
+                    ),
+                    "single_uav_braking_action_reward": _round(
+                        learning_components.get(
+                            "single_uav_braking_action_reward", 0.0
+                        )
+                    ),
+                    "single_uav_braking_action_reward_coef": _round(
+                        learning_components.get(
+                            "single_uav_braking_action_reward_coef", 0.0
+                        )
+                    ),
+                    "single_uav_target_velocity_action_error": _round(
+                        learning_components.get(
+                            "single_uav_target_velocity_action_error", 0.0
+                        )
+                    ),
+                    "single_uav_target_velocity_action_reward": _round(
+                        learning_components.get(
+                            "single_uav_target_velocity_action_reward", 0.0
+                        )
+                    ),
+                    "single_uav_target_velocity_action_reward_coef": _round(
+                        learning_components.get(
+                            "single_uav_target_velocity_action_reward_coef", 0.0
+                        )
+                    ),
                     "single_uav_learning_core": _round(
                         learning_components.get("single_uav_learning_core", 0.0)
+                    ),
+                    "single_uav_learning_reward_preclip": _round(
+                        learning_components.get(
+                            "single_uav_learning_reward_preclip", 0.0
+                        )
                     ),
                     "single_uav_learning_reward": _round(
                         learning_components.get("single_uav_learning_reward", 0.0)
@@ -921,7 +1227,7 @@ class _EpisodeTraceWriter:
                     "normalized_delay": _round(global_metrics["delay_normalized"]),
                     "normalized_connectivity": _round(global_metrics["connectivity_normalized"]),
                     "collision": info["collision"],
-                    "task_complete": 0,
+                    "task_complete": int(bool(info.get("task_complete", False))),
                 }
             )
 
@@ -1082,6 +1388,7 @@ class _EpisodeTraceWriter:
                 "rate_execution": "decision_rate_baseline",
                 "substep_simulation": False,
                 "action_semantics": "action_at_t_applies_over_[t,t+decision_dt)_and_returns_observation_at_t+1",
+                "motion_action_contract": self.environment.config.motion.action_contract(),
                 "coordinate_frame": "ENU",
                 "units": {"position": "m", "time": "s", "angles": "rad"},
                 "normalization_fitted_on_training_observations": self.normalization_fitted,
@@ -1132,6 +1439,11 @@ class _EpisodeTraceWriter:
                     self.unavoidable_dynamic_collision_steps
                 ),
                 "safety_execution_mode": self.environment.config.safety_execution_mode,
+                "braking_safety_projection_count": int(
+                    self.braking_safety_projection_count
+                ),
+                "boundary_events": int(self.boundary_projection_count),
+                "boundary_penalty_sum": float(self.boundary_penalty_sum),
                 "reward_config": reward_config,
                 "scenario_generation": _jsonable(self.environment.scenario_metadata),
                 "goals": {
@@ -1188,6 +1500,11 @@ class _EpisodeTraceWriter:
             "max_action_saturation": float(np.max(self.action_saturation_values)) if self.action_saturation_values else 0.0,
             "safety_projection_count": int(self.safety_projection_count),
             "boundary_projection_count": int(self.boundary_projection_count),
+            "boundary_events": int(self.boundary_projection_count),
+            "boundary_penalty_sum": float(self.boundary_penalty_sum),
+            "braking_safety_projection_count": int(
+                self.braking_safety_projection_count
+            ),
         }
 
 
