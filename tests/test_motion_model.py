@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from src.simulation.motion_model import (
+    BRAKING_DISTANCE_SPEED_PROFILE_EARLY_SMOOTH,
+    BRAKING_DISTANCE_SPEED_PROFILE_LEGACY,
     MotionConfig,
     UAVKinematicState,
     apply_velocity_increment,
@@ -79,3 +82,52 @@ def test_stopping_distance_and_target_speed_are_bounded_and_monotone() -> None:
         max_speed_mps=12.0,
     )
     assert 0.5 <= slow_target < far_target <= 6.0
+
+
+def test_early_smooth_braking_profile_is_continuous_and_preserves_endpoints() -> None:
+    kwargs = {
+        "goal_threshold_m": 1.0,
+        "near_goal_radius_m": 8.0,
+        "stable_speed_mps": 0.5,
+        "braking_acceleration_mps2": 2.0,
+        "braking_margin_m": 2.0,
+        "far_target_speed_mps": 6.0,
+        "max_speed_mps": 12.0,
+        "speed_profile": BRAKING_DISTANCE_SPEED_PROFILE_EARLY_SMOOTH,
+    }
+    distances = np.linspace(0.0, 8.0, 801)
+    speeds = np.asarray(
+        [braking_distance_target_speed(float(distance), **kwargs) for distance in distances]
+    )
+    assert np.isclose(speeds[0], 0.5)
+    assert np.isclose(speeds[-1], 6.0)
+    assert np.all(np.diff(speeds) >= -1e-10)
+    assert np.isclose(
+        braking_distance_target_speed(3.0, **kwargs),
+        braking_distance_target_speed(3.0 - 1e-8, **kwargs),
+        atol=1e-6,
+    )
+    assert np.isclose(
+        braking_distance_target_speed(3.0, **kwargs),
+        braking_distance_target_speed(3.0 + 1e-8, **kwargs),
+        atol=1e-6,
+    )
+    assert braking_distance_target_speed(3.0, **kwargs) > 0.5
+    assert braking_distance_target_speed(5.0, **kwargs) < braking_distance_target_speed(
+        5.0,
+        **{**kwargs, "speed_profile": BRAKING_DISTANCE_SPEED_PROFILE_LEGACY},
+    )
+
+
+def test_unknown_braking_distance_speed_profile_is_rejected() -> None:
+    with pytest.raises(ValueError, match="speed_profile"):
+        braking_distance_target_speed(
+            3.0,
+            goal_threshold_m=1.0,
+            stable_speed_mps=0.5,
+            braking_acceleration_mps2=2.0,
+            braking_margin_m=2.0,
+            far_target_speed_mps=6.0,
+            max_speed_mps=12.0,
+            speed_profile="unknown",
+        )

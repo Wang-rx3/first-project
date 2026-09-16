@@ -997,6 +997,10 @@ class _EpisodeTraceWriter:
                     "single_uav_speed_control_mode": learning_components.get(
                         "single_uav_speed_control_mode", "fixed_near_goal"
                     ),
+                    "single_uav_braking_distance_speed_profile": learning_components.get(
+                        "single_uav_braking_distance_speed_profile",
+                        info.get("single_uav_braking_distance_speed_profile", "legacy"),
+                    ),
                     "single_uav_target_speed_far_mps": _round(
                         learning_components.get(
                             "single_uav_target_speed_far_mps", 0.0
@@ -1138,6 +1142,192 @@ class _EpisodeTraceWriter:
                         learning_components.get(
                             "single_uav_target_velocity_action_reward_coef", 0.0
                         )
+                    ),
+                    "single_uav_terminal_braking_radius_m": _round(
+                        learning_components.get(
+                            "single_uav_terminal_braking_radius_m", 0.0
+                        )
+                    ),
+                    "single_uav_terminal_braking_active": int(
+                        bool(
+                            learning_components.get(
+                                "single_uav_terminal_braking_active", False
+                            )
+                        )
+                    ),
+                    "single_uav_terminal_braking_need_signal": _round(
+                        learning_components.get(
+                            "single_uav_terminal_braking_need_signal", 0.0
+                        )
+                    ),
+                    "single_uav_terminal_speed_reduction_signal": _round(
+                        learning_components.get(
+                            "single_uav_terminal_speed_reduction_signal", 0.0
+                        )
+                    ),
+                    "single_uav_terminal_forward_accel_signal": _round(
+                        learning_components.get(
+                            "single_uav_terminal_forward_accel_signal", 0.0
+                        )
+                    ),
+                    "single_uav_terminal_braking_reward": _round(
+                        learning_components.get(
+                            "single_uav_terminal_braking_reward", 0.0
+                        )
+                    ),
+                    "single_uav_terminal_braking_reward_coef": _round(
+                        learning_components.get(
+                            "single_uav_terminal_braking_reward_coef", 0.0
+                        )
+                    ),
+                    "single_uav_terminal_acceleration_penalty": _round(
+                        learning_components.get(
+                            "single_uav_terminal_acceleration_penalty", 0.0
+                        )
+                    ),
+                    "single_uav_terminal_acceleration_penalty_coef": _round(
+                        learning_components.get(
+                            "single_uav_terminal_acceleration_penalty_coef", 0.0
+                        )
+                    ),
+                    "single_uav_pre_speed_excess_mps": _round(
+                        learning_components.get(
+                            "single_uav_pre_speed_excess_mps", 0.0
+                        )
+                    ),
+                    "single_uav_post_speed_excess_mps": _round(
+                        learning_components.get(
+                            "single_uav_post_speed_excess_mps", 0.0
+                        )
+                    ),
+                    "single_uav_braking_progress_signal": _round(
+                        learning_components.get(
+                            "single_uav_braking_progress_signal", 0.0
+                        )
+                    ),
+                    "single_uav_braking_progress_reward": _round(
+                        learning_components.get(
+                            "single_uav_braking_progress_reward", 0.0
+                        )
+                    ),
+                    "single_uav_braking_progress_reward_coef": _round(
+                        learning_components.get(
+                            "single_uav_braking_progress_reward_coef", 0.0
+                        )
+                    ),
+                    "single_uav_terminal_radial_progress_active": int(
+                        bool(
+                            learning_components.get(
+                                "single_uav_terminal_radial_progress_active", False
+                            )
+                        )
+                    ),
+                    "single_uav_terminal_radial_progress_m": _round(
+                        learning_components.get(
+                            "single_uav_terminal_radial_progress_m", 0.0
+                        )
+                    ),
+                    "single_uav_terminal_radial_progress_speed_excess_mps": _round(
+                        learning_components.get(
+                            "single_uav_terminal_radial_progress_speed_excess_mps", 0.0
+                        )
+                    ),
+                    "single_uav_terminal_radial_progress_speed_gate": _round(
+                        learning_components.get(
+                            "single_uav_terminal_radial_progress_speed_gate", 0.0
+                        )
+                    ),
+                    "single_uav_terminal_radial_progress_signal": _round(
+                        learning_components.get(
+                            "single_uav_terminal_radial_progress_signal", 0.0
+                        )
+                    ),
+                    "single_uav_terminal_radial_progress_reward": _round(
+                        learning_components.get(
+                            "single_uav_terminal_radial_progress_reward", 0.0
+                        )
+                    ),
+                    "single_uav_terminal_radial_progress_reward_coef": _round(
+                        learning_components.get(
+                            "single_uav_terminal_radial_progress_reward_coef", 0.0
+                        )
+                    ),
+                    "single_uav_terminal_target_velocity_vector_active": int(
+                        bool(
+                            learning_components.get(
+                                "single_uav_terminal_target_velocity_vector_active",
+                                False,
+                            )
+                        )
+                    ),
+                    "single_uav_terminal_target_velocity_vector_error_pre_mps": _round(
+                        learning_components.get(
+                            "single_uav_terminal_target_velocity_vector_error_pre_mps",
+                            0.0,
+                        )
+                    ),
+                    "single_uav_terminal_target_velocity_vector_error_post_mps": _round(
+                        learning_components.get(
+                            "single_uav_terminal_target_velocity_vector_error_post_mps",
+                            0.0,
+                        )
+                    ),
+                    "single_uav_terminal_target_velocity_vector_error_reduction_mps": _round(
+                        learning_components.get(
+                            "single_uav_terminal_target_velocity_vector_error_reduction_mps",
+                            0.0,
+                        )
+                    ),
+                    "single_uav_terminal_target_velocity_vector_signal": _round(
+                        learning_components.get(
+                            "single_uav_terminal_target_velocity_vector_signal", 0.0
+                        )
+                    ),
+                    "single_uav_terminal_target_velocity_vector_reward": _round(
+                        learning_components.get(
+                            "single_uav_terminal_target_velocity_vector_reward", 0.0
+                        )
+                    ),
+                    "single_uav_terminal_target_velocity_vector_reward_coef": _round(
+                        learning_components.get(
+                            "single_uav_terminal_target_velocity_vector_reward_coef",
+                            0.0,
+                        )
+                    ),
+                    "single_uav_terminal_target_velocity_vector_radial_gate_enabled": int(
+                        bool(
+                            learning_components.get(
+                                "single_uav_terminal_target_velocity_vector_radial_gate_enabled",
+                                False,
+                            )
+                        )
+                    ),
+                    "single_uav_terminal_target_velocity_vector_activation_distance_m": _round(
+                        learning_components.get(
+                            "single_uav_terminal_target_velocity_vector_activation_distance_m",
+                            0.0,
+                        )
+                    ),
+                    "single_uav_terminal_target_velocity_vector_post_radial_velocity_mps": _round(
+                        learning_components.get(
+                            "single_uav_terminal_target_velocity_vector_post_radial_velocity_mps",
+                            0.0,
+                        )
+                    ),
+                    "single_uav_terminal_target_velocity_vector_radial_gate": _round(
+                        learning_components.get(
+                            "single_uav_terminal_target_velocity_vector_radial_gate",
+                            0.0,
+                        )
+                    ),
+                    "single_uav_terminal_target_velocity_vector_mps": json.dumps(
+                        _jsonable(
+                            learning_components.get(
+                                "single_uav_terminal_target_velocity_vector_mps",
+                                [0.0, 0.0, 0.0],
+                            )
+                        ),
+                        ensure_ascii=False,
                     ),
                     "single_uav_learning_core": _round(
                         learning_components.get("single_uav_learning_core", 0.0)

@@ -25,7 +25,7 @@ import numpy as np
 from ..schema import EPISODE_FILE_SPECS, EPISODE_SCHEMA_VERSION, validate_episode_benchmark
 from ..simulation.environment import MultiUAVJointEnv, RewardConfig, SimulationConfig
 from ..simulation.ekf import EKFConfig
-from ..simulation.motion_model import MotionConfig
+from ..simulation.motion_model import MotionConfig, BRAKING_DISTANCE_SPEED_PROFILES
 from ..simulation.sensor_model import SensorConfig
 from ..simulation.scenario import (
     add_moving_los_screen,
@@ -73,6 +73,15 @@ _EPISODE_RE = re.compile(r"^episode_(\d+)$")
 _SINGLE_UAV_BRAKING_FEATURE_SCALE_FLOOR = 0.25
 _SINGLE_UAV_VELOCITY_SCALE_FLOOR_FRACTION = 0.5
 _SINGLE_UAV_GOAL_DELTA_SCALE_FLOOR_M = 10.0
+# Terminal curriculum distances are deliberately explicit so the training
+# schedule remains auditable and does not introduce random start-state
+# sampling as a second experimental factor.
+_SINGLE_UAV_TERMINAL_CURRICULUM_DISTANCE_STAGES = (
+    (1.5, 2.25, 3.0),
+    (3.0, 4.0, 5.0),
+    (5.0, 6.5, 8.0),
+)
+_SINGLE_UAV_TERMINAL_CURRICULUM_CYCLE_LENGTH = 10
 _DEFAULT_EKF_PARAMETERS = {
     "vo_position_std_m": 0.03,
     "process_position_std_m": 0.08,
@@ -237,18 +246,39 @@ class FormalExperimentConfig:
     single_uav_target_speed_far_mps: float = 6.0
     single_uav_braking_acceleration_mps2: float = 2.0
     single_uav_braking_margin_m: float = 2.0
+    # ``legacy`` preserves the original stopping-distance target-speed
+    # envelope; ``early_smooth`` is the isolated 3 m approach variant.
+    single_uav_braking_distance_speed_profile: str = "legacy"
     single_uav_stable_hold_steps: int = 1
     single_uav_goal_hold_reward: float = 0.0
     single_uav_speed_deficit_penalty_weight: float = 0.05
     single_uav_goal_direction_coef: float = 0.75
     single_uav_braking_action_reward_coef: float = 1.0
     single_uav_target_velocity_action_reward_coef: float = 0.0
+    single_uav_terminal_braking_radius_m: float = 3.0
+    single_uav_terminal_braking_reward_coef: float = 0.0
+    single_uav_terminal_acceleration_penalty_coef: float = 0.0
+    single_uav_braking_progress_reward_coef: float = 0.0
+    # Optional positive-only estimated radial progress credit in the terminal
+    # (1 m, 3 m] approach band; zero preserves the historical contract.
+    single_uav_terminal_radial_progress_reward_coef: float = 0.0
+    # Optional positive-only terminal target-velocity-vector correction credit
+    # in the estimated (1 m, 3 m] band; zero preserves history.  The radial
+    # gate is the isolated F-route variant and is disabled by default.
+    single_uav_terminal_target_velocity_vector_reward_coef: float = 0.0
+    single_uav_terminal_target_velocity_vector_radial_gate_enabled: bool = False
     single_uav_braking_safety_projection_enabled: bool = False
     # Optional training-only curriculum for the local braking skill.  It
     # changes neither the generated geometry nor validation/test starts; a
     # fraction of training episodes starts at 3/5/8 m with a controlled
     # forward speed so the policy observes timely-braking states often enough.
     single_uav_braking_curriculum_fraction: float = 0.0
+    # Training-only terminal-braking starts.  When enabled, a ten-episode
+    # schedule partitions the existing total braking budget: terminal starts
+    # use the requested share, standard starts use the remainder, and all
+    # other slots are original far starts.  Terminal distances progress
+    # through 1.5-3 m, 3-5 m, and 5-8 m; validation/test are untouched.
+    single_uav_terminal_braking_curriculum_fraction: float = 0.0
     learning_reward_mode: str = "legacy"
     learning_reward_clip: float = 1.0
     learning_collision_penalty_cap: float = 1.0
@@ -298,6 +328,10 @@ class FormalExperimentConfig:
     # features). The safety smoke opts into four additional dynamic-motion
     # values, producing a 41-dimensional node feature.
     dynamic_obstacle_motion_features_enabled: bool = False
+    # Optional Stage-2A actor observation extension.  The three estimated
+    # UAV-relative obstacle-direction features are appended after the legacy
+    # node slots, so the default historical contract remains unchanged.
+    single_uav_obstacle_direction_features_enabled: bool = False
     # Corrected safety-study option: include a one-step swept envelope of
     # moving obstacles in the execution-time safety projection.  It remains
     # disabled by default so historical checkpoints remain reproducible.
@@ -510,6 +544,11 @@ class FormalExperimentConfig:
             raise ValueError(
                 "single_uav_braking_margin_m must be finite and non-negative"
             )
+        if self.single_uav_braking_distance_speed_profile not in BRAKING_DISTANCE_SPEED_PROFILES:
+            raise ValueError(
+                "single_uav_braking_distance_speed_profile must be one of "
+                + ", ".join(BRAKING_DISTANCE_SPEED_PROFILES)
+            )
         if (
             isinstance(self.single_uav_stable_hold_steps, bool)
             or int(self.single_uav_stable_hold_steps)
@@ -552,11 +591,51 @@ class FormalExperimentConfig:
             raise ValueError(
                 "single_uav_target_velocity_action_reward_coef must be finite and non-negative"
             )
+        if (
+            not np.isfinite(float(self.single_uav_terminal_braking_radius_m))
+            or float(self.single_uav_terminal_braking_radius_m)
+            < float(self.single_uav_goal_threshold_m)
+        ):
+            raise ValueError(
+                "single_uav_terminal_braking_radius_m must be finite and at least the goal threshold"
+            )
+        for name, value in (
+            (
+                "single_uav_terminal_braking_reward_coef",
+                self.single_uav_terminal_braking_reward_coef,
+            ),
+            (
+                "single_uav_terminal_acceleration_penalty_coef",
+                self.single_uav_terminal_acceleration_penalty_coef,
+            ),
+            (
+                "single_uav_braking_progress_reward_coef",
+                self.single_uav_braking_progress_reward_coef,
+            ),
+            (
+                "single_uav_terminal_radial_progress_reward_coef",
+                self.single_uav_terminal_radial_progress_reward_coef,
+            ),
+            (
+                "single_uav_terminal_target_velocity_vector_reward_coef",
+                self.single_uav_terminal_target_velocity_vector_reward_coef,
+            ),
+        ):
+            if not np.isfinite(float(value)) or float(value) < 0.0:
+                raise ValueError(f"{name} must be finite and non-negative")
         if not isinstance(
             self.single_uav_braking_safety_projection_enabled, bool
         ):
             raise ValueError(
                 "single_uav_braking_safety_projection_enabled must be boolean"
+            )
+        if not isinstance(
+            self.single_uav_terminal_target_velocity_vector_radial_gate_enabled,
+            bool,
+        ):
+            raise ValueError(
+                "single_uav_terminal_target_velocity_vector_radial_gate_enabled "
+                "must be boolean"
             )
         if (
             not np.isfinite(float(self.single_uav_braking_curriculum_fraction))
@@ -564,6 +643,17 @@ class FormalExperimentConfig:
         ):
             raise ValueError(
                 "single_uav_braking_curriculum_fraction must be finite and in [0, 1]"
+            )
+        if (
+            not np.isfinite(
+                float(self.single_uav_terminal_braking_curriculum_fraction)
+            )
+            or not 0.0
+            <= float(self.single_uav_terminal_braking_curriculum_fraction)
+            <= 1.0
+        ):
+            raise ValueError(
+                "single_uav_terminal_braking_curriculum_fraction must be finite and in [0, 1]"
             )
         if self.learning_reward_mode not in {
             "legacy",
@@ -942,6 +1032,8 @@ class FormalExperimentConfig:
         base = 41 if self.dynamic_obstacle_motion_features_enabled else 37
         if self.uav_count == 1 and self.single_uav_speed_control_mode == "braking_distance":
             base += 2
+        if self.single_uav_obstacle_direction_features_enabled:
+            base += 3
         return base
 
 
@@ -998,6 +1090,7 @@ def _make_environment(
     seed: int,
     *,
     metric_scales: Mapping[str, float] | None = None,
+    safety_projection_enabled: bool | None = None,
     cooperative_ekf_enabled: bool = True,
     measurement_overhead_enabled: bool | None = None,
     measurement_budget_enabled: bool | None = None,
@@ -1005,6 +1098,16 @@ def _make_environment(
     visual_odometry_quality_model: Mapping[str, Any] | None = None,
 ) -> MultiUAVJointEnv:
     """Create the same pure-Python environment used by the pilot."""
+
+    # ``None`` preserves every historical caller's SimulationConfig default.
+    # Evaluation-only safety attribution audits may override this one physical
+    # execution switch without adding it to FormalExperimentConfig or changing
+    # any training/checkpoint contract.
+    effective_safety_projection_enabled = (
+        True
+        if safety_projection_enabled is None
+        else bool(safety_projection_enabled)
+    )
 
     if measurement_overhead_enabled is None:
         measurement_overhead_enabled = config.measurement_overhead_enabled
@@ -1083,6 +1186,9 @@ def _make_environment(
                 single_uav_braking_margin_m=float(
                     config.single_uav_braking_margin_m
                 ),
+                single_uav_braking_distance_speed_profile=str(
+                    config.single_uav_braking_distance_speed_profile
+                ),
                 single_uav_stable_hold_steps=int(
                     config.single_uav_stable_hold_steps
                 ),
@@ -1100,6 +1206,27 @@ def _make_environment(
                 ),
                 single_uav_target_velocity_action_reward_coef=float(
                     config.single_uav_target_velocity_action_reward_coef
+                ),
+                single_uav_terminal_braking_radius_m=float(
+                    config.single_uav_terminal_braking_radius_m
+                ),
+                single_uav_terminal_braking_reward_coef=float(
+                    config.single_uav_terminal_braking_reward_coef
+                ),
+                single_uav_terminal_acceleration_penalty_coef=float(
+                    config.single_uav_terminal_acceleration_penalty_coef
+                ),
+                single_uav_braking_progress_reward_coef=float(
+                    config.single_uav_braking_progress_reward_coef
+                ),
+                single_uav_terminal_radial_progress_reward_coef=float(
+                    config.single_uav_terminal_radial_progress_reward_coef
+                ),
+                single_uav_terminal_target_velocity_vector_reward_coef=float(
+                    config.single_uav_terminal_target_velocity_vector_reward_coef
+                ),
+                single_uav_terminal_target_velocity_vector_radial_gate_enabled=bool(
+                    config.single_uav_terminal_target_velocity_vector_radial_gate_enabled
                 ),
                 single_uav_braking_safety_projection_enabled=bool(
                     config.single_uav_braking_safety_projection_enabled
@@ -1153,8 +1280,12 @@ def _make_environment(
             measurement_update_eligibility_enabled=bool(
                 config.measurement_update_eligibility_enabled
             ),
+            safety_projection_enabled=effective_safety_projection_enabled,
             dynamic_obstacle_motion_features_enabled=(
                 config.dynamic_obstacle_motion_features_enabled
+            ),
+            single_uav_obstacle_direction_features_enabled=(
+                config.single_uav_obstacle_direction_features_enabled
             ),
             dynamic_obstacle_swept_projection_enabled=(
                 config.dynamic_obstacle_swept_projection_enabled
@@ -1287,6 +1418,7 @@ def _apply_single_uav_braking_curriculum(
     *,
     split: str | None,
     episode_index: int,
+    phase: str | None = None,
 ) -> dict[str, Any]:
     """Add training-only local braking starts without changing scene geometry.
 
@@ -1296,19 +1428,27 @@ def _apply_single_uav_braking_curriculum(
     the original start-to-goal ray at a prescribed distance and is given a
     forward initial velocity.  Validation and test calls never enter this
     branch, so their initial state remains the original fixed-scene state.
+    ``phase`` is used to keep the optional terminal branch out of warm-up;
+    ``None`` is treated as the historical direct-call/train behavior.
     """
 
     result = copy.deepcopy(dict(scenario))
     fraction = float(config.single_uav_braking_curriculum_fraction)
+    terminal_fraction = float(
+        config.single_uav_terminal_braking_curriculum_fraction
+    )
+    effective_terminal_fraction = (
+        terminal_fraction if phase in {None, "train"} else 0.0
+    )
+    curriculum_kind = _single_uav_braking_curriculum_kind(
+        int(episode_index), fraction, effective_terminal_fraction
+    )
     if (
         config.uav_count != 1
         or split != "train"
-        or fraction <= 0.0
+        or curriculum_kind is None
         or config.single_uav_learning_mode != "loc_goal_v2"
         or config.single_uav_speed_control_mode != "braking_distance"
-        or not _single_uav_braking_curriculum_episode_selected(
-            int(episode_index), fraction
-        )
     ):
         return result
 
@@ -1332,8 +1472,27 @@ def _apply_single_uav_braking_curriculum(
     if not np.isfinite(initial_distance) or initial_distance <= 1.5:
         return result
     direction = displacement / initial_distance
-    distance_levels = (3.0, 5.0, 8.0)
-    requested_distance = float(distance_levels[int(episode_index) % len(distance_levels)])
+    if curriculum_kind == "terminal":
+        (
+            requested_distance,
+            terminal_stage_index,
+            terminal_level_index,
+            terminal_distance_range,
+            terminal_stage_progress,
+        ) = _single_uav_terminal_curriculum_distance(
+            int(episode_index), config.train_episodes
+        )
+    else:
+        # Preserve the original 3/5/8 schedule for the existing curriculum
+        # so previous baseline comparisons remain directly interpretable.
+        distance_levels = (3.0, 5.0, 8.0)
+        requested_distance = float(
+            distance_levels[int(episode_index) % len(distance_levels)]
+        )
+        terminal_stage_index = None
+        terminal_level_index = None
+        terminal_distance_range = None
+        terminal_stage_progress = None
     target_distance = min(requested_distance, max(1.5, initial_distance - 1.0))
     curriculum_position = goal - direction * target_distance
 
@@ -1393,7 +1552,17 @@ def _apply_single_uav_braking_curriculum(
         "enabled": True,
         "split": "train",
         "episode_index": int(episode_index),
+        "curriculum_kind": curriculum_kind,
         "fraction": fraction,
+        "terminal_fraction": terminal_fraction,
+        "terminal_curriculum_phase": phase or "train",
+        "terminal_curriculum_schedule": (
+            _single_uav_braking_curriculum_schedule(
+                fraction, effective_terminal_fraction
+            )
+            if effective_terminal_fraction > 0.0
+            else None
+        ),
         "requested_distance_m": requested_distance,
         "actual_distance_m": actual_distance,
         "initial_speed_mps": initial_speed,
@@ -1402,6 +1571,17 @@ def _apply_single_uav_braking_curriculum(
         "goal_m": goal.tolist(),
         "geometry_unchanged": True,
     }
+    if curriculum_kind == "terminal":
+        result["single_uav_braking_curriculum"].update(
+            {
+                "terminal_curriculum_stage_index": terminal_stage_index,
+                "terminal_curriculum_level_index": terminal_level_index,
+                "terminal_curriculum_stage_progress": terminal_stage_progress,
+                "terminal_curriculum_distance_range_m": list(
+                    terminal_distance_range
+                ),
+            }
+        )
     return result
 
 
@@ -1424,12 +1604,134 @@ def _single_uav_braking_curriculum_episode_selected(
     return int(episode_index) % cycle_length < selected_per_cycle
 
 
+def _single_uav_braking_curriculum_schedule(
+    fraction: float,
+    terminal_fraction: float,
+) -> dict[str, float | int]:
+    """Return the auditable slot allocation for the training curriculum.
+
+    The historical local-braking curriculum keeps its five-episode schedule
+    when no terminal curriculum is requested.  Enabling terminal curriculum
+    switches only the slot allocator to ten episodes.  The terminal slots are
+    taken from the existing total braking budget rather than added on top of
+    it: with ``fraction=0.40`` and ``terminal_fraction=0.30`` this yields one
+    standard slot, three terminal slots, and six untouched original starts.
+    """
+
+    terminal_enabled = float(terminal_fraction) > 0.0
+    cycle_length = (
+        _SINGLE_UAV_TERMINAL_CURRICULUM_CYCLE_LENGTH
+        if terminal_enabled
+        else 5
+    )
+    total_braking_slots = (
+        int(math.ceil(cycle_length * float(fraction)))
+        if float(fraction) > 0.0
+        else 0
+    )
+    total_braking_slots = min(cycle_length, max(0, total_braking_slots))
+    terminal_slots = (
+        int(math.ceil(cycle_length * float(terminal_fraction)))
+        if terminal_enabled
+        else 0
+    )
+    terminal_slots = min(total_braking_slots, max(0, terminal_slots))
+    standard_slots = total_braking_slots - terminal_slots
+    untouched_slots = cycle_length - total_braking_slots
+    standard_fraction = standard_slots / cycle_length
+    return {
+        "cycle_length_episodes": cycle_length,
+        "braking_budget_slots_per_cycle": total_braking_slots,
+        "standard_slots_per_cycle": standard_slots,
+        "terminal_slots_per_cycle": terminal_slots,
+        "untouched_far_slots_per_cycle": untouched_slots,
+        "braking_budget_fraction_requested": float(fraction),
+        "braking_budget_fraction_realized": total_braking_slots / cycle_length,
+        "standard_fraction_requested": standard_fraction,
+        "standard_fraction_realized": standard_fraction,
+        "terminal_fraction_requested": float(terminal_fraction),
+        "terminal_fraction_realized": terminal_slots / cycle_length,
+        "far_fraction_realized": untouched_slots / cycle_length,
+        "non_terminal_fraction_realized": (
+            (standard_slots + untouched_slots) / cycle_length
+        ),
+    }
+
+
+def _single_uav_terminal_curriculum_distance(
+    episode_index: int,
+    train_episodes: int,
+) -> tuple[float, int, int, tuple[float, float], float]:
+    """Map training progress to a deterministic terminal distance.
+
+    The three stages are ``1.5-3 m``, ``3-5 m`` and ``5-8 m``.  Each stage
+    exposes three fixed distances so the curriculum is deterministic and
+    progressively harder without adding a random-start factor.
+    """
+
+    episode_count = max(1, int(train_episodes))
+    bounded_episode = min(max(0, int(episode_index)), episode_count - 1)
+    progress = (
+        0.0
+        if episode_count == 1
+        else float(bounded_episode) / float(episode_count - 1)
+    )
+    stage_position = progress * len(_SINGLE_UAV_TERMINAL_CURRICULUM_DISTANCE_STAGES)
+    stage_index = min(
+        len(_SINGLE_UAV_TERMINAL_CURRICULUM_DISTANCE_STAGES) - 1,
+        int(stage_position),
+    )
+    stage_progress = min(1.0, max(0.0, stage_position - stage_index))
+    level_index = min(2, int(stage_progress * 3.0))
+    stage_levels = _SINGLE_UAV_TERMINAL_CURRICULUM_DISTANCE_STAGES[stage_index]
+    requested_distance = float(stage_levels[level_index])
+    distance_range = (float(stage_levels[0]), float(stage_levels[-1]))
+    return (
+        requested_distance,
+        stage_index,
+        level_index,
+        distance_range,
+        progress,
+    )
+
+
+def _single_uav_braking_curriculum_kind(
+    episode_index: int,
+    fraction: float,
+    terminal_fraction: float,
+) -> str | None:
+    """Return the deterministic curriculum branch for one train episode.
+
+    With terminal curriculum disabled, preserve the historical five-episode
+    schedule for the standard 3/5/8 m curriculum.  With terminal curriculum
+    enabled, use a ten-episode schedule: standard slots come first, terminal
+    slots follow, and the remaining slots retain the original far starts.
+    The terminal fraction is a portion of the existing total braking budget,
+    so ``fraction=0.40`` and ``terminal_fraction=0.30`` produce one standard
+    slot and three terminal slots in each ten-episode cycle.
+    """
+
+    schedule = _single_uav_braking_curriculum_schedule(
+        fraction, terminal_fraction
+    )
+    cycle_length = int(schedule["cycle_length_episodes"])
+    slot = int(episode_index) % cycle_length
+    standard_slots = int(schedule["standard_slots_per_cycle"])
+    if slot < standard_slots:
+        return "standard"
+    terminal_slots = int(schedule["terminal_slots_per_cycle"])
+    if standard_slots <= slot < standard_slots + terminal_slots:
+        return "terminal"
+    return None
+
+
 def _scenario_for(
     config: FormalExperimentConfig,
     seed: int,
     *,
     split: str | None = None,
     episode_index: int = 0,
+    phase: str | None = None,
 ) -> dict[str, Any]:
     if config.scenario_path is not None:
         path = Path(config.scenario_path)
@@ -1450,7 +1752,11 @@ def _scenario_for(
             physical_collision_enabled=config.communication_occluder_physical_collision_enabled,
         )
         return _apply_single_uav_braking_curriculum(
-            config, scenario, split=split, episode_index=episode_index
+            config,
+            scenario,
+            split=split,
+            episode_index=episode_index,
+            phase=phase,
         )
     if config.scenario_pool_root is not None:
         if split is None:
@@ -1478,7 +1784,11 @@ def _scenario_for(
             scenario["scenario_profile"] = profile
             scenario.setdefault("screening_geometry", profile.get("screening_geometry"))
         return _apply_single_uav_braking_curriculum(
-            config, scenario, split=split, episode_index=episode_index
+            config,
+            scenario,
+            split=split,
+            episode_index=episode_index,
+            phase=phase,
         )
     scenario = generate_scenario(
         int(config.scenario_seed) if config.scenario_seed is not None else seed,
@@ -1497,7 +1807,11 @@ def _scenario_for(
         scenario["scenario_profile"] = profile
         scenario["screening_geometry"] = profile["screening_geometry"]
     return _apply_single_uav_braking_curriculum(
-        config, scenario, split=split, episode_index=episode_index
+        config,
+        scenario,
+        split=split,
+        episode_index=episode_index,
+        phase=phase,
     )
 
 
@@ -1753,7 +2067,13 @@ def _fit_normalizer(
         )
         observations, info = environment.reset(
             seed=seed,
-            scenario_config=_scenario_for(config, seed, split="train", episode_index=index),
+            scenario_config=_scenario_for(
+                config,
+                seed,
+                split="train",
+                episode_index=index,
+                phase="warmup",
+            ),
         )
         samples.append(observations)
         episode_u_values = [
@@ -1865,7 +2185,13 @@ def _fit_normalizer(
             # The 15-state EKF estimate and 15 covariance-diagonal entries
             # precede the three goal-delta values in the node schema.
             "goal_delta_m": slice(30, 33),
-            "braking_features": slice(config.node_feature_dim - 2, config.node_feature_dim),
+            # Directional obstacle features are appended after the historical
+            # braking slots, so do not infer this slice from the final node
+            # dimension when the Stage-2A opt-in is enabled.
+            "braking_features": slice(
+                41 if config.dynamic_obstacle_motion_features_enabled else 37,
+                (41 if config.dynamic_obstacle_motion_features_enabled else 37) + 2,
+            ),
         }
 
         def _apply_node_floors(
@@ -2065,7 +2391,11 @@ def fit_shared_training_metric_scales(
             observations, _info = environment.reset(
                 seed=seed,
                 scenario_config=_scenario_for(
-                    probe_config, seed, split="train", episode_index=index
+                    probe_config,
+                    seed,
+                    split="train",
+                    episode_index=index,
+                    phase="warmup",
                 ),
             )
             for _step in range(config.max_steps):
@@ -2313,6 +2643,85 @@ def _episode_metrics(episode_path: Path, episode_summary: Mapping[str, Any]) -> 
     ) if normalized_uncertainty.size else 0.0
     collision_values = [_number(row, "collision") for row in rewards]
     task_values = [_number(row, "task_complete") for row in rewards]
+    terminal_radial_progress_rewards = [
+        _number(row, "single_uav_terminal_radial_progress_reward", 0.0)
+        for row in rewards
+    ]
+    terminal_radial_progress_active = [
+        _number(row, "single_uav_terminal_radial_progress_active", 0.0)
+        for row in rewards
+    ]
+    terminal_radial_progress_signals = [
+        _number(row, "single_uav_terminal_radial_progress_signal", 0.0)
+        for row in rewards
+    ]
+    terminal_radial_progress_speed_gates = [
+        _number(row, "single_uav_terminal_radial_progress_speed_gate", 0.0)
+        for row in rewards
+    ]
+    terminal_radial_progress_m = [
+        _number(row, "single_uav_terminal_radial_progress_m", 0.0)
+        for row in rewards
+    ]
+    terminal_target_vector_rewards = [
+        _number(row, "single_uav_terminal_target_velocity_vector_reward", 0.0)
+        for row in rewards
+    ]
+    terminal_target_vector_active = [
+        _number(row, "single_uav_terminal_target_velocity_vector_active", 0.0)
+        for row in rewards
+    ]
+    terminal_target_vector_signals = [
+        _number(row, "single_uav_terminal_target_velocity_vector_signal", 0.0)
+        for row in rewards
+    ]
+    terminal_target_vector_error_pre = [
+        _number(row, "single_uav_terminal_target_velocity_vector_error_pre_mps", 0.0)
+        for row in rewards
+    ]
+    terminal_target_vector_error_post = [
+        _number(row, "single_uav_terminal_target_velocity_vector_error_post_mps", 0.0)
+        for row in rewards
+    ]
+    terminal_target_vector_error_reduction = [
+        _number(row, "single_uav_terminal_target_velocity_vector_error_reduction_mps", 0.0)
+        for row in rewards
+    ]
+    terminal_target_vector_activation_distance = [
+        _number(
+            row,
+            "single_uav_terminal_target_velocity_vector_activation_distance_m",
+            0.0,
+        )
+        for row in rewards
+    ]
+    terminal_target_vector_post_radial_velocity = [
+        _number(
+            row,
+            "single_uav_terminal_target_velocity_vector_post_radial_velocity_mps",
+            0.0,
+        )
+        for row in rewards
+    ]
+    terminal_target_vector_radial_gate = [
+        _number(row, "single_uav_terminal_target_velocity_vector_radial_gate", 0.0)
+        for row in rewards
+    ]
+    learning_clip = float(reward_config.get("learning_reward_clip", 0.0))
+    finite_preclip_values = [
+        _number(row, "single_uav_learning_reward_preclip", float("nan"))
+        for row in rewards
+    ]
+    finite_preclip_values = [
+        value for value in finite_preclip_values if np.isfinite(value)
+    ]
+    learning_reward_clip_saturation_fraction = float(
+        np.mean(
+            [abs(value) >= learning_clip - 1e-12 for value in finite_preclip_values]
+        )
+        if learning_clip > 0.0 and finite_preclip_values
+        else 0.0
+    )
     return {
         "episode_id": episode_summary["episode_id"],
         "scenario_id": episode_summary["scenario_id"],
@@ -2421,6 +2830,115 @@ def _episode_metrics(episode_path: Path, episode_summary: Mapping[str, Any]) -> 
         ),
         "target_velocity_action_reward": _finite_mean(
             _number(row, "single_uav_target_velocity_action_reward")
+            for row in rewards
+        ),
+        "terminal_braking_active_fraction": _finite_mean(
+            _number(row, "single_uav_terminal_braking_active") for row in rewards
+        ),
+        "terminal_speed_reduction_signal": _finite_mean(
+            _number(row, "single_uav_terminal_speed_reduction_signal")
+            for row in rewards
+        ),
+        "terminal_forward_accel_signal": _finite_mean(
+            _number(row, "single_uav_terminal_forward_accel_signal")
+            for row in rewards
+        ),
+        "terminal_braking_reward": _finite_mean(
+            _number(row, "single_uav_terminal_braking_reward") for row in rewards
+        ),
+        "terminal_acceleration_penalty": _finite_mean(
+            _number(row, "single_uav_terminal_acceleration_penalty")
+            for row in rewards
+        ),
+        "braking_progress_signal": _finite_mean(
+            _number(row, "single_uav_braking_progress_signal")
+            for row in rewards
+        ),
+        "braking_progress_reward": _finite_mean(
+            _number(row, "single_uav_braking_progress_reward")
+            for row in rewards
+        ),
+        "terminal_radial_progress_active_fraction": _finite_mean(
+            terminal_radial_progress_active
+        ),
+        "terminal_radial_progress_m": _finite_mean(terminal_radial_progress_m),
+        "terminal_radial_progress_signal": _finite_mean(
+            terminal_radial_progress_signals
+        ),
+        "terminal_radial_progress_speed_gate": _finite_mean(
+            terminal_radial_progress_speed_gates
+        ),
+        "terminal_radial_progress_reward": _finite_mean(
+            terminal_radial_progress_rewards
+        ),
+        "terminal_radial_progress_reward_total": float(
+            sum(value for value in terminal_radial_progress_rewards if np.isfinite(value))
+        ),
+        "terminal_radial_progress_reward_max": float(
+            max(
+                [value for value in terminal_radial_progress_rewards if np.isfinite(value)]
+                or [0.0]
+            )
+        ),
+        "terminal_radial_progress_reward_coef": float(
+            reward_config.get("single_uav_terminal_radial_progress_reward_coef", 0.0)
+        ),
+        "terminal_target_velocity_vector_active_fraction": _finite_mean(
+            terminal_target_vector_active
+        ),
+        "terminal_target_velocity_vector_signal": _finite_mean(
+            terminal_target_vector_signals
+        ),
+        "terminal_target_velocity_vector_error_pre_mps": _finite_mean(
+            terminal_target_vector_error_pre
+        ),
+        "terminal_target_velocity_vector_error_post_mps": _finite_mean(
+            terminal_target_vector_error_post
+        ),
+        "terminal_target_velocity_vector_error_reduction_mps": _finite_mean(
+            terminal_target_vector_error_reduction
+        ),
+        "terminal_target_velocity_vector_activation_distance_m": _finite_mean(
+            terminal_target_vector_activation_distance
+        ),
+        "terminal_target_velocity_vector_post_radial_velocity_mps": _finite_mean(
+            terminal_target_vector_post_radial_velocity
+        ),
+        "terminal_target_velocity_vector_radial_gate": _finite_mean(
+            terminal_target_vector_radial_gate
+        ),
+        "terminal_target_velocity_vector_radial_gate_enabled": bool(
+            reward_config.get(
+                "single_uav_terminal_target_velocity_vector_radial_gate_enabled",
+                False,
+            )
+        ),
+        "terminal_target_velocity_vector_reward": _finite_mean(
+            terminal_target_vector_rewards
+        ),
+        "terminal_target_velocity_vector_reward_total": float(
+            sum(value for value in terminal_target_vector_rewards if np.isfinite(value))
+        ),
+        "terminal_target_velocity_vector_reward_max": float(
+            max(
+                [value for value in terminal_target_vector_rewards if np.isfinite(value)]
+                or [0.0]
+            )
+        ),
+        "terminal_target_velocity_vector_reward_coef": float(
+            reward_config.get(
+                "single_uav_terminal_target_velocity_vector_reward_coef", 0.0
+            )
+        ),
+        "learning_reward_clip_saturation_fraction": (
+            learning_reward_clip_saturation_fraction
+        ),
+        "pre_speed_excess_mps": _finite_mean(
+            _number(row, "single_uav_pre_speed_excess_mps")
+            for row in rewards
+        ),
+        "post_speed_excess_mps": _finite_mean(
+            _number(row, "single_uav_post_speed_excess_mps")
             for row in rewards
         ),
         "speed_control_mode": str(
@@ -2546,6 +3064,37 @@ def _write_episode_metrics(path: Path, rows: Sequence[Mapping[str, Any]]) -> Non
          "braking_action_reward",
          "target_velocity_action_error",
          "target_velocity_action_reward",
+         "terminal_braking_active_fraction",
+         "terminal_speed_reduction_signal",
+         "terminal_forward_accel_signal",
+         "terminal_braking_reward",
+         "terminal_acceleration_penalty",
+         "braking_progress_signal",
+         "braking_progress_reward",
+         "terminal_radial_progress_active_fraction",
+         "terminal_radial_progress_m",
+         "terminal_radial_progress_signal",
+         "terminal_radial_progress_speed_gate",
+         "terminal_radial_progress_reward",
+         "terminal_radial_progress_reward_total",
+         "terminal_radial_progress_reward_max",
+         "terminal_radial_progress_reward_coef",
+         "terminal_target_velocity_vector_active_fraction",
+         "terminal_target_velocity_vector_signal",
+         "terminal_target_velocity_vector_error_pre_mps",
+         "terminal_target_velocity_vector_error_post_mps",
+         "terminal_target_velocity_vector_error_reduction_mps",
+         "terminal_target_velocity_vector_activation_distance_m",
+         "terminal_target_velocity_vector_post_radial_velocity_mps",
+         "terminal_target_velocity_vector_radial_gate",
+         "terminal_target_velocity_vector_radial_gate_enabled",
+         "terminal_target_velocity_vector_reward",
+         "terminal_target_velocity_vector_reward_total",
+         "terminal_target_velocity_vector_reward_max",
+         "terminal_target_velocity_vector_reward_coef",
+         "learning_reward_clip_saturation_fraction",
+         "pre_speed_excess_mps",
+         "post_speed_excess_mps",
          "localization_cost",
         "goal_distance_initial",
         "goal_distance_final",
@@ -2740,6 +3289,9 @@ def _write_scale_manifest(
                 config.single_uav_braking_acceleration_mps2
             ),
             "braking_margin_m": float(config.single_uav_braking_margin_m),
+            "braking_distance_speed_profile": str(
+                config.single_uav_braking_distance_speed_profile
+            ),
             "stable_hold_steps": int(config.single_uav_stable_hold_steps),
             "goal_hold_reward": float(config.single_uav_goal_hold_reward),
             "speed_deficit_penalty_weight": float(
@@ -2752,6 +3304,36 @@ def _write_scale_manifest(
             "target_velocity_action_reward_coef": float(
                 config.single_uav_target_velocity_action_reward_coef
             ),
+            "terminal_braking_radius_m": float(
+                config.single_uav_terminal_braking_radius_m
+            ),
+            "terminal_braking_reward_coef": float(
+                config.single_uav_terminal_braking_reward_coef
+            ),
+            "terminal_acceleration_penalty_coef": float(
+                config.single_uav_terminal_acceleration_penalty_coef
+            ),
+            "braking_progress_reward_coef": float(
+                config.single_uav_braking_progress_reward_coef
+            ),
+            "terminal_radial_progress_reward_coef": float(
+                config.single_uav_terminal_radial_progress_reward_coef
+            ),
+            "terminal_target_velocity_vector_reward_coef": float(
+                config.single_uav_terminal_target_velocity_vector_reward_coef
+            ),
+            "terminal_target_velocity_vector_radial_gate_enabled": bool(
+                config.single_uav_terminal_target_velocity_vector_radial_gate_enabled
+            ),
+            "terminal_target_velocity_vector_reward_definition": (
+                "positive_only_reduction_of_frozen_pre_action_target_velocity_vector_error"
+                "_using_post_action_estimated_velocity_in_(goal_threshold,terminal_braking_radius]"
+                "_with_optional_post_radial_velocity_gate"
+            ),
+            "terminal_target_velocity_vector_error_scale_mps": 0.5,
+            "terminal_radial_progress_definition": (
+                "positive_estimated_goal_distance_progress_in_(goal_threshold,terminal_braking_radius]_gated_by_speed_excess"
+            ),
             "boundary_penalty_weight": float(config.boundary_penalty_weight),
             "braking_safety_projection_enabled": bool(
                 config.single_uav_braking_safety_projection_enabled
@@ -2759,6 +3341,28 @@ def _write_scale_manifest(
             "braking_curriculum_fraction": float(
                 config.single_uav_braking_curriculum_fraction
             ),
+            "terminal_braking_curriculum_fraction": float(
+                config.single_uav_terminal_braking_curriculum_fraction
+            ),
+            "terminal_curriculum_contract": {
+                "enabled": bool(
+                    float(config.single_uav_terminal_braking_curriculum_fraction)
+                    > 0.0
+                ),
+                "scope": "train_phase_only",
+                "schedule": _single_uav_braking_curriculum_schedule(
+                    config.single_uav_braking_curriculum_fraction,
+                    config.single_uav_terminal_braking_curriculum_fraction,
+                ),
+                "distance_stages_m": [
+                    [float(stage[0]), float(stage[-1])]
+                    for stage in _SINGLE_UAV_TERMINAL_CURRICULUM_DISTANCE_STAGES
+                ],
+                "distance_levels_m": [
+                    [float(value) for value in stage]
+                    for stage in _SINGLE_UAV_TERMINAL_CURRICULUM_DISTANCE_STAGES
+                ],
+            },
             "goal_progress_definition": "estimated_goal_distance_previous_minus_current",
             "stable_goal_definition": (
                 "estimated_goal_distance_at_or_below_goal_threshold_and_actual_speed_at_or_below_speed_threshold_for_configured_consecutive_hold_steps"
@@ -2949,6 +3553,7 @@ def _run_episode(
     episode_total: int,
     metric_scales: Mapping[str, float] | None = None,
     flush_update: bool = True,
+    scenario_config: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, float] | None, list[dict[str, Any]]]:
     require_new_episode(scale_root / split / f"episode_{serial:06d}")
     _seed_everything(seed)
@@ -2958,14 +3563,20 @@ def _run_episode(
         f"[{config.uav_count} UAV][{phase}] episode {episode_index}/{episode_total} start seed={seed}",
     )
     environment = _make_environment(config, seed, metric_scales=metric_scales)
-    observations, info = environment.reset(
-        seed=seed,
-        scenario_config=_scenario_for(
+    reset_scenario = (
+        copy.deepcopy(dict(scenario_config))
+        if scenario_config is not None
+        else _scenario_for(
             config,
             seed,
             split=split,
             episode_index=max(0, int(episode_index) - 1),
-        ),
+            phase=phase,
+        )
+    )
+    observations, info = environment.reset(
+        seed=seed,
+        scenario_config=reset_scenario,
     )
     episode_id = f"episode_{serial:06d}"
     event_file = scale_root / "diagnostics" / f"{split}_cooperative_updates.jsonl"
@@ -3903,6 +4514,9 @@ def run_preliminary(
                 config.single_uav_braking_acceleration_mps2
             ),
             "braking_margin_m": float(config.single_uav_braking_margin_m),
+            "braking_distance_speed_profile": str(
+                config.single_uav_braking_distance_speed_profile
+            ),
             "stable_hold_steps": int(config.single_uav_stable_hold_steps),
             "goal_hold_reward": float(config.single_uav_goal_hold_reward),
             "speed_deficit_penalty_weight": float(
@@ -3915,12 +4529,52 @@ def run_preliminary(
             "target_velocity_action_reward_coef": float(
                 config.single_uav_target_velocity_action_reward_coef
             ),
+            "terminal_braking_radius_m": float(
+                config.single_uav_terminal_braking_radius_m
+            ),
+            "terminal_braking_reward_coef": float(
+                config.single_uav_terminal_braking_reward_coef
+            ),
+            "terminal_acceleration_penalty_coef": float(
+                config.single_uav_terminal_acceleration_penalty_coef
+            ),
+            "braking_progress_reward_coef": float(
+                config.single_uav_braking_progress_reward_coef
+            ),
+            "terminal_radial_progress_reward_coef": float(
+                config.single_uav_terminal_radial_progress_reward_coef
+            ),
+            "terminal_radial_progress_definition": (
+                "positive_estimated_goal_distance_progress_in_(goal_threshold,terminal_braking_radius]_gated_by_speed_excess"
+            ),
             "braking_safety_projection_enabled": bool(
                 config.single_uav_braking_safety_projection_enabled
             ),
             "braking_curriculum_fraction": float(
                 config.single_uav_braking_curriculum_fraction
             ),
+            "terminal_braking_curriculum_fraction": float(
+                config.single_uav_terminal_braking_curriculum_fraction
+            ),
+            "terminal_curriculum_contract": {
+                "enabled": bool(
+                    float(config.single_uav_terminal_braking_curriculum_fraction)
+                    > 0.0
+                ),
+                "scope": "train_phase_only",
+                "schedule": _single_uav_braking_curriculum_schedule(
+                    config.single_uav_braking_curriculum_fraction,
+                    config.single_uav_terminal_braking_curriculum_fraction,
+                ),
+                "distance_stages_m": [
+                    [float(stage[0]), float(stage[-1])]
+                    for stage in _SINGLE_UAV_TERMINAL_CURRICULUM_DISTANCE_STAGES
+                ],
+                "distance_levels_m": [
+                    [float(value) for value in stage]
+                    for stage in _SINGLE_UAV_TERMINAL_CURRICULUM_DISTANCE_STAGES
+                ],
+            },
             "stable_goal_definition": (
                 "estimated_goal_distance_at_or_below_goal_threshold_and_actual_speed_at_or_below_speed_threshold_for_configured_consecutive_hold_steps"
             ),
@@ -3970,6 +4624,9 @@ def run_preliminary(
         "node_feature_dim": config.node_feature_dim,
         "dynamic_obstacle_motion_features_enabled": bool(
             config.dynamic_obstacle_motion_features_enabled
+        ),
+        "single_uav_obstacle_direction_features_enabled": bool(
+            config.single_uav_obstacle_direction_features_enabled
         ),
         "safety_execution": {
             "mode": str(config.safety_execution_mode),

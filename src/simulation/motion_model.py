@@ -10,6 +10,20 @@ import numpy as np
 
 
 BRAKING_DIAGNOSTIC_TOLERANCE_MPS = 1e-4
+BRAKING_DISTANCE_SPEED_PROFILE_LEGACY = "legacy"
+BRAKING_DISTANCE_SPEED_PROFILE_EARLY_SMOOTH = "early_smooth"
+BRAKING_DISTANCE_SPEED_PROFILES = (
+    BRAKING_DISTANCE_SPEED_PROFILE_LEGACY,
+    BRAKING_DISTANCE_SPEED_PROFILE_EARLY_SMOOTH,
+)
+
+# The normalized anchor fractions are deliberately fixed and auditable.  With
+# the current 1 m goal radius and 8 m near-goal boundary they correspond to
+# 1, 3, 5, 6, and 8 m.  The profile keeps a non-zero low-speed target around
+# 3 m, starts reducing the admissible speed before 5 m, and reaches the cruise
+# target continuously at the near-goal boundary.
+_EARLY_SMOOTH_DISTANCE_FRACTIONS = (0.0, 2.0 / 7.0, 4.0 / 7.0, 5.0 / 7.0, 1.0)
+_EARLY_SMOOTH_SPEED_FRACTIONS = (0.0, 0.16, 0.35, 0.53, 1.0)
 
 
 def stopping_distance_m(
@@ -38,11 +52,13 @@ def braking_distance_target_speed(
     distance_m: float,
     *,
     goal_threshold_m: float,
+    near_goal_radius_m: float = 8.0,
     stable_speed_mps: float,
     braking_acceleration_mps2: float,
     braking_margin_m: float,
     far_target_speed_mps: float,
     max_speed_mps: float,
+    speed_profile: str = BRAKING_DISTANCE_SPEED_PROFILE_LEGACY,
 ) -> float:
     """Return a speed target that leaves room for braking before the goal.
 
@@ -50,21 +66,73 @@ def braking_distance_target_speed(
     target is capped by the configured cruise and physical speed limits, so
     the policy is encouraged to fly quickly when there is room and to start
     reducing speed before the stopping distance would cross the goal region.
+
+    ``legacy`` is the original stopping-distance envelope.  ``early_smooth``
+    is a single-factor alternative used by the terminal-approach experiment:
+    it interpolates a fixed, normalized set of distance/speed anchors with a
+    smoothstep easing function.  It changes only the target-speed curve; the
+    braking/goal reward coefficients and physical dynamics remain untouched.
     """
 
     distance = max(0.0, float(distance_m))
     goal_radius = max(0.0, float(goal_threshold_m))
+    near_radius = max(goal_radius, float(near_goal_radius_m))
     stable_speed = max(0.0, float(stable_speed_mps))
     margin = max(0.0, float(braking_margin_m))
     far_speed = max(stable_speed, float(far_target_speed_mps))
     speed_limit = max(stable_speed, float(max_speed_mps))
     acceleration = float(braking_acceleration_mps2)
-    if not np.isfinite(distance) or not np.isfinite(goal_radius):
+    profile = str(speed_profile)
+    if profile not in BRAKING_DISTANCE_SPEED_PROFILES:
+        raise ValueError(
+            "speed_profile must be one of "
+            + ", ".join(BRAKING_DISTANCE_SPEED_PROFILES)
+        )
+    if not np.isfinite(distance) or not np.isfinite(goal_radius) or not np.isfinite(near_radius):
         return stable_speed
     if not np.isfinite(acceleration) or acceleration <= 0.0:
         raise ValueError("braking_acceleration_mps2 must be finite and positive")
     if not np.isfinite(margin) or not np.isfinite(far_speed) or not np.isfinite(speed_limit):
         raise ValueError("braking-distance speed parameters must be finite")
+    if profile == BRAKING_DISTANCE_SPEED_PROFILE_EARLY_SMOOTH:
+        if distance <= goal_radius:
+            return float(np.clip(stable_speed, stable_speed, speed_limit))
+        if near_radius <= goal_radius:
+            return float(np.clip(far_speed, stable_speed, speed_limit))
+        span = near_radius - goal_radius
+        anchor_distances = np.asarray(
+            [goal_radius + fraction * span for fraction in _EARLY_SMOOTH_DISTANCE_FRACTIONS],
+            dtype=float,
+        )
+        anchor_speeds = np.asarray(
+            [
+                stable_speed + fraction * (far_speed - stable_speed)
+                for fraction in _EARLY_SMOOTH_SPEED_FRACTIONS
+            ],
+            dtype=float,
+        )
+        if distance >= near_radius:
+            return float(np.clip(far_speed, stable_speed, speed_limit))
+        interval = int(np.searchsorted(anchor_distances, distance, side="right") - 1)
+        interval = max(0, min(interval, len(anchor_distances) - 2))
+        left_distance = float(anchor_distances[interval])
+        right_distance = float(anchor_distances[interval + 1])
+        left_speed = float(anchor_speeds[interval])
+        right_speed = float(anchor_speeds[interval + 1])
+        if right_distance <= left_distance:
+            return float(np.clip(left_speed, stable_speed, speed_limit))
+        progress = float(
+            np.clip(
+                (distance - left_distance) / (right_distance - left_distance),
+                0.0,
+                1.0,
+            )
+        )
+        eased = progress * progress * (3.0 - 2.0 * progress)
+        return float(
+            np.clip(left_speed + eased * (right_speed - left_speed), stable_speed, speed_limit)
+        )
+
     usable_distance = max(0.0, distance - goal_radius - margin)
     stopping_limited_speed = float(
         np.sqrt(max(0.0, stable_speed * stable_speed + 2.0 * acceleration * usable_distance))

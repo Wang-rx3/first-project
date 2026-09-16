@@ -238,6 +238,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="extra distance kept outside the goal radius for braking",
     )
     preliminary_parser.add_argument(
+        "--single-uav-braking-distance-speed-profile",
+        choices=("legacy", "early_smooth"),
+        default="legacy",
+        help=(
+            "braking_distance target-speed curve; early_smooth starts the "
+            "5--3 m deceleration earlier without changing reward weights"
+        ),
+    )
+    preliminary_parser.add_argument(
         "--single-uav-stable-hold-steps",
         type=int,
         default=1,
@@ -277,12 +286,86 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     preliminary_parser.add_argument(
+        "--single-uav-terminal-braking-radius-m",
+        type=float,
+        default=3.0,
+        help=(
+            "final-approach radius where actual speed reduction receives "
+            "additional training credit"
+        ),
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-terminal-braking-reward-coef",
+        type=float,
+        default=0.0,
+        help=(
+            "training-only coefficient for actual speed reduction while "
+            "overspeeding inside the terminal-braking radius"
+        ),
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-terminal-acceleration-penalty-coef",
+        type=float,
+        default=0.0,
+        help=(
+            "training-only coefficient penalizing continued forward "
+            "acceleration while overspeeding inside the terminal radius"
+        ),
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-braking-progress-reward-coef",
+        type=float,
+        default=0.0,
+        help=(
+            "training-only coefficient rewarding reductions in the distance-aware "
+            "overspeed error"
+        ),
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-terminal-radial-progress-reward-coef",
+        type=float,
+        default=0.0,
+        help=(
+            "training-only positive coefficient for estimated radial progress "
+            "in the (1 m, 3 m] terminal approach band, gated by speed excess"
+        ),
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-terminal-target-velocity-vector-reward-coef",
+        type=float,
+        default=0.0,
+        help=(
+            "training-only positive coefficient for reducing EKF-estimated "
+            "target-velocity-vector error in the post-action (1 m, 3 m] band"
+        ),
+    )
+    preliminary_parser.add_argument(
         "--single-uav-braking-curriculum-fraction",
         type=float,
         default=0.0,
         help=(
             "training-only fraction that starts the UAV at 3/5/8 m from the goal "
             "with a controlled forward speed; validation/test keep the original start"
+        ),
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-terminal-braking-curriculum-fraction",
+        type=float,
+        default=0.0,
+        help=(
+            "training-only share of the existing braking curriculum budget using "
+            "controlled starts at "
+            "1.5-3 m, 3-5 m, and 5-8 m from the goal over training progress; "
+            "validation/test starts are unchanged"
+        ),
+    )
+    preliminary_parser.add_argument(
+        "--single-uav-obstacle-direction-features",
+        action="store_true",
+        default=False,
+        help=(
+            "opt in to three UAV-relative static-obstacle direction features; "
+            "historical checkpoints remain on the legacy observation contract"
         ),
     )
     preliminary_parser.add_argument(
@@ -2843,6 +2926,866 @@ def _build_parser() -> argparse.ArgumentParser:
         help="allow writing into a non-empty analysis output directory",
     )
 
+    single_uav_checkpoint_eval_parser = subparsers.add_parser(
+        "evaluate-single-uav-terminal-starts",
+        help="evaluate a frozen single-UAV checkpoint from terminal and normal start distances",
+    )
+    single_uav_checkpoint_eval_parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_terminal_curriculum30_coef025_seed2026/"
+            "scale_1/checkpoints/final.pt"
+        ),
+        help="completed single-UAV checkpoint; it is loaded read-only",
+    )
+    single_uav_checkpoint_eval_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_terminal_curriculum30_coef025_"
+            "start_distance_diagnostic_seed2026"
+        ),
+        help="new independent diagnostic dataset root",
+    )
+    single_uav_checkpoint_eval_parser.add_argument(
+        "--logs-output",
+        type=Path,
+        default=None,
+        help="diagnostic CSV directory; defaults under logs/preliminary",
+    )
+    single_uav_checkpoint_eval_parser.add_argument(
+        "--plots-output",
+        type=Path,
+        default=None,
+        help="diagnostic plot directory; defaults under plots/preliminary",
+    )
+    single_uav_checkpoint_eval_parser.add_argument(
+        "--episodes-per-group",
+        type=int,
+        default=20,
+        help="independent read-only episodes for each of the four groups",
+    )
+    single_uav_checkpoint_eval_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="replace only the exact requested diagnostic output directory",
+    )
+    single_uav_checkpoint_eval_parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="disable per-episode progress output",
+    )
+
+    single_uav_finetune_parser = subparsers.add_parser(
+        "run-single-uav-navigation-preserving-finetune",
+        help="verify the coef=0.25 baseline, smoke-test, and run navigation-preserving fine-tuning",
+    )
+    single_uav_finetune_parser.add_argument(
+        "--baseline-checkpoint",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_braking_progress025_seed2026/"
+            "scale_1/checkpoints/final.pt"
+        ),
+        help="original coef=0.25 baseline checkpoint",
+    )
+    single_uav_finetune_parser.add_argument(
+        "--baseline-verify-output",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_braking_progress025_baseline_verify_seed2026"
+        ),
+        help="independent read-only baseline verification output",
+    )
+    single_uav_finetune_parser.add_argument(
+        "--baseline-verify-logs",
+        type=Path,
+        default=None,
+        help="baseline verification logs directory",
+    )
+    single_uav_finetune_parser.add_argument(
+        "--baseline-verify-plots",
+        type=Path,
+        default=None,
+        help="baseline verification plots directory",
+    )
+    single_uav_finetune_parser.add_argument(
+        "--smoke-output",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_navigation_preserving_finetune_smoke_seed2026"
+        ),
+        help="independent fine-tuning smoke output",
+    )
+    single_uav_finetune_parser.add_argument(
+        "--smoke-logs",
+        type=Path,
+        default=None,
+        help="fine-tuning smoke logs directory",
+    )
+    single_uav_finetune_parser.add_argument(
+        "--smoke-plots",
+        type=Path,
+        default=None,
+        help="fine-tuning smoke plots directory",
+    )
+    single_uav_finetune_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_navigation_preserving_finetune_seed2026"
+        ),
+        help="independent full fine-tuning output",
+    )
+    single_uav_finetune_parser.add_argument(
+        "--logs-output",
+        type=Path,
+        default=None,
+        help="full fine-tuning logs directory",
+    )
+    single_uav_finetune_parser.add_argument(
+        "--plots-output",
+        type=Path,
+        default=None,
+        help="full fine-tuning plots directory",
+    )
+    single_uav_finetune_parser.add_argument(
+        "--smoke-train-episodes",
+        type=int,
+        default=10,
+        help="smoke train episode count",
+    )
+    single_uav_finetune_parser.add_argument(
+        "--smoke-validation-episodes",
+        type=int,
+        default=2,
+        help="smoke validation episode count",
+    )
+    single_uav_finetune_parser.add_argument(
+        "--smoke-test-episodes",
+        type=int,
+        default=2,
+        help="smoke test episode count",
+    )
+    single_uav_finetune_parser.add_argument(
+        "--train-episodes",
+        type=int,
+        default=100,
+        help="full fine-tuning train episode count",
+    )
+    single_uav_finetune_parser.add_argument(
+        "--validation-episodes",
+        type=int,
+        default=20,
+        help="full fine-tuning validation episode count",
+    )
+    single_uav_finetune_parser.add_argument(
+        "--test-episodes",
+        type=int,
+        default=20,
+        help="full fine-tuning test episode count",
+    )
+    single_uav_finetune_parser.add_argument(
+        "--single-uav-braking-distance-speed-profile",
+        choices=("legacy", "early_smooth"),
+        default="legacy",
+        help=(
+            "target-speed curve used during this fine-tuning round; "
+            "legacy preserves the prior run"
+        ),
+    )
+    single_uav_finetune_parser.add_argument(
+        "--single-uav-terminal-radial-progress-reward-coef",
+        type=float,
+        default=0.0,
+        help=(
+            "training-only terminal 1--3 m radial-progress reward coefficient"
+        ),
+    )
+    single_uav_finetune_parser.add_argument(
+        "--single-uav-terminal-target-velocity-vector-reward-coef",
+        type=float,
+        default=0.0,
+        help=(
+            "training-only terminal target-velocity-vector correction "
+            "coefficient in the estimated (1 m, 3 m] band"
+        ),
+    )
+    single_uav_finetune_parser.add_argument(
+        "--single-uav-terminal-target-velocity-vector-radial-gate-enabled",
+        action="store_true",
+        help=(
+            "gate positive terminal target-velocity-vector correction by "
+            "post-action radial velocity; enables the isolated F route"
+        ),
+    )
+    single_uav_finetune_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="replace only the exact requested new output directories",
+    )
+    single_uav_finetune_parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="disable per-episode progress output",
+    )
+
+    single_uav_approach_parser = subparsers.add_parser(
+        "diagnose-single-uav-terminal-approach",
+        help="paired read-only 8m-to-1m terminal approach diagnostic for two frozen checkpoints",
+    )
+    single_uav_approach_parser.add_argument(
+        "--baseline-checkpoint",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_braking_progress025_seed2026/"
+            "scale_1/checkpoints/final.pt"
+        ),
+        help="original coef=0.25 baseline checkpoint",
+    )
+    single_uav_approach_parser.add_argument(
+        "--fine-tuned-checkpoint",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_navigation_preserving_finetune_seed2026/"
+            "scale_1/checkpoints/final.pt"
+        ),
+        help="navigation-preserving fine-tuned checkpoint",
+    )
+    single_uav_approach_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/synthetic/single_uav_terminal_approach_diagnostic_seed2026"),
+        help="independent paired diagnostic dataset root",
+    )
+    single_uav_approach_parser.add_argument(
+        "--logs-output",
+        type=Path,
+        default=None,
+        help="diagnostic CSV directory; defaults under logs/preliminary",
+    )
+    single_uav_approach_parser.add_argument(
+        "--plots-output",
+        type=Path,
+        default=None,
+        help="diagnostic plot directory; defaults under plots/preliminary",
+    )
+    single_uav_approach_parser.add_argument(
+        "--episodes",
+        type=int,
+        default=20,
+        help="paired normal far-distance test episodes per checkpoint",
+    )
+    single_uav_approach_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="replace only the exact requested diagnostic output directory",
+    )
+    single_uav_approach_parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="disable per-episode progress output",
+    )
+
+    single_uav_vector_parser = subparsers.add_parser(
+        "diagnose-single-uav-terminal-velocity-vector",
+        help="paired frozen C-vs-D terminal target-velocity-vector diagnostic",
+    )
+    single_uav_vector_parser.add_argument(
+        "--c-checkpoint",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_speed_curve_early_smooth_finetune_seed2026/"
+            "scale_1/checkpoints/final.pt"
+        ),
+        help="C early_smooth-only checkpoint",
+    )
+    single_uav_vector_parser.add_argument(
+        "--d-checkpoint",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_terminal_radial_progress05_early_smooth_seed2026/"
+            "scale_1/checkpoints/final.pt"
+        ),
+        help="D terminal radial-progress ablation checkpoint",
+    )
+    single_uav_vector_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_c_vs_d_terminal_velocity_vector_diagnostic_seed2026"
+        ),
+        help="independent paired diagnostic dataset root",
+    )
+    single_uav_vector_parser.add_argument("--logs-output", type=Path, default=None)
+    single_uav_vector_parser.add_argument("--plots-output", type=Path, default=None)
+    single_uav_vector_parser.add_argument("--episodes", type=int, default=20)
+    single_uav_vector_parser.add_argument("--force", action="store_true")
+    single_uav_vector_parser.add_argument("--quiet", action="store_true")
+
+    single_uav_acde_parser = subparsers.add_parser(
+        "compare-single-uav-acde",
+        help="build a read-only A/C/D/E normal far-distance test comparison",
+    )
+    single_uav_acde_parser.add_argument(
+        "--baseline-root",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_terminal_velocity_vector05_early_smooth_"
+            "baseline_verify_seed2026"
+        ),
+        help="frozen original coef=0.25 baseline verification output",
+    )
+    single_uav_acde_parser.add_argument(
+        "--c-root",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_speed_curve_early_smooth_finetune_seed2026"
+        ),
+        help="frozen C early-smooth speed-control output",
+    )
+    single_uav_acde_parser.add_argument(
+        "--d-root",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_terminal_radial_progress05_early_smooth_seed2026"
+        ),
+        help="frozen D radial-progress ablation output",
+    )
+    single_uav_acde_parser.add_argument(
+        "--e-root",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_terminal_velocity_vector05_early_smooth_seed2026"
+        ),
+        help="frozen E vector-correction output",
+    )
+    single_uav_acde_parser.add_argument(
+        "--logs-output",
+        type=Path,
+        default=Path("logs/preliminary/single_uav_acde_comparison_seed2026"),
+    )
+    single_uav_acde_parser.add_argument(
+        "--plots-output",
+        type=Path,
+        default=Path("plots/preliminary/single_uav_acde_comparison_seed2026"),
+    )
+    single_uav_acde_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="replace only the exact requested comparison output directories",
+    )
+
+    single_uav_acef_parser = subparsers.add_parser(
+        "compare-single-uav-acef",
+        help="build a read-only A/C/E/F normal far-distance test comparison",
+    )
+    single_uav_acef_parser.add_argument(
+        "--baseline-root",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_braking_progress025_seed2026"
+        ),
+    )
+    single_uav_acef_parser.add_argument(
+        "--c-root",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_speed_curve_early_smooth_finetune_seed2026"
+        ),
+    )
+    single_uav_acef_parser.add_argument(
+        "--e-root",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_terminal_velocity_vector05_early_smooth_seed2026"
+        ),
+    )
+    single_uav_acef_parser.add_argument(
+        "--f-root",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_F_radial_gated_vector05_early_smooth_seed2026"
+        ),
+    )
+    single_uav_acef_parser.add_argument(
+        "--logs-output",
+        type=Path,
+        default=Path("logs/preliminary/single_uav_acef_comparison_seed2026"),
+    )
+    single_uav_acef_parser.add_argument(
+        "--plots-output",
+        type=Path,
+        default=Path("plots/preliminary/single_uav_acef_comparison_seed2026"),
+    )
+    single_uav_acef_parser.add_argument("--force", action="store_true")
+
+    single_uav_feasibility_parser = subparsers.add_parser(
+        "diagnose-single-uav-scripted-feasibility",
+        help="run a read-only scripted/oracle single-UAV physical-feasibility test",
+    )
+    single_uav_feasibility_parser.add_argument(
+        "--baseline-checkpoint",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_braking_progress025_seed2026/"
+            "scale_1/checkpoints/final.pt"
+        ),
+        help="original coef=0.25 baseline checkpoint for frozen comparison",
+    )
+    single_uav_feasibility_parser.add_argument(
+        "--fine-tuned-checkpoint",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_navigation_preserving_finetune_seed2026/"
+            "scale_1/checkpoints/final.pt"
+        ),
+        help="navigation-preserving fine-tuned checkpoint for frozen comparison",
+    )
+    single_uav_feasibility_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/synthetic/single_uav_scripted_feasibility_seed2026"),
+        help="independent feasibility dataset root",
+    )
+    single_uav_feasibility_parser.add_argument(
+        "--logs-output",
+        type=Path,
+        default=None,
+        help="diagnostic CSV directory; defaults under logs/preliminary",
+    )
+    single_uav_feasibility_parser.add_argument(
+        "--plots-output",
+        type=Path,
+        default=None,
+        help="diagnostic plot directory; defaults under plots/preliminary",
+    )
+    single_uav_feasibility_parser.add_argument(
+        "--episodes",
+        type=int,
+        default=20,
+        help="paired normal far-distance test episodes per policy",
+    )
+    single_uav_feasibility_parser.add_argument(
+        "--sanity-episodes",
+        type=int,
+        default=2,
+        help="oracle-only sanity episodes before the formal batch",
+    )
+    single_uav_feasibility_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="replace only the exact requested feasibility output directory",
+    )
+    single_uav_feasibility_parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="disable per-episode progress output",
+    )
+
+    single_uav_actor_audit_parser = subparsers.add_parser(
+        "diagnose-single-uav-rl-equivalent-oracle-audit",
+        help="run a read-only RL-observation oracle and frozen actor action audit",
+    )
+    single_uav_actor_audit_parser.add_argument(
+        "--baseline-checkpoint",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_braking_progress025_seed2026/"
+            "scale_1/checkpoints/final.pt"
+        ),
+        help="original coef=0.25 baseline checkpoint",
+    )
+    single_uav_actor_audit_parser.add_argument(
+        "--fine-tuned-checkpoint",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_navigation_preserving_finetune_seed2026/"
+            "scale_1/checkpoints/final.pt"
+        ),
+        help="navigation-preserving fine-tuned checkpoint",
+    )
+    single_uav_actor_audit_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/synthetic/single_uav_rl_equivalent_oracle_audit_seed2026"),
+        help="independent audit dataset root",
+    )
+    single_uav_actor_audit_parser.add_argument(
+        "--logs-output",
+        type=Path,
+        default=None,
+        help="diagnostic CSV directory; defaults under logs/preliminary",
+    )
+    single_uav_actor_audit_parser.add_argument(
+        "--plots-output",
+        type=Path,
+        default=None,
+        help="diagnostic plot directory; defaults under plots/preliminary",
+    )
+    single_uav_actor_audit_parser.add_argument(
+        "--episodes",
+        type=int,
+        default=20,
+        help="paired normal far-distance episodes per policy",
+    )
+    single_uav_actor_audit_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="replace only the exact requested audit output directories",
+    )
+    single_uav_actor_audit_parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="disable per-episode progress output",
+    )
+
+    single_uav_collision_audit_parser = subparsers.add_parser(
+        "diagnose-single-uav-collision-attribution",
+        help="run a paired safety-on/safety-off collision attribution audit",
+    )
+    single_uav_collision_audit_parser.add_argument(
+        "--baseline-checkpoint",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_braking_progress025_seed2026/"
+            "scale_1/checkpoints/final.pt"
+        ),
+    )
+    single_uav_collision_audit_parser.add_argument(
+        "--dagger-checkpoint",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_dagger_actor_seed2026/"
+            "scale_1/checkpoints/best_validation.pt"
+        ),
+    )
+    single_uav_collision_audit_parser.add_argument(
+        "--hierarchical-checkpoint",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_dagger_actor_seed2026/"
+            "scale_1/checkpoints/best_validation.pt"
+        ),
+        help="frozen low-level checkpoint used by the hierarchical waypoint policy",
+    )
+    single_uav_collision_audit_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_collision_attribution_audit_seed2026"
+        ),
+    )
+    single_uav_collision_audit_parser.add_argument(
+        "--logs-output",
+        type=Path,
+        default=None,
+    )
+    single_uav_collision_audit_parser.add_argument(
+        "--plots-output",
+        type=Path,
+        default=None,
+    )
+    single_uav_collision_audit_parser.add_argument(
+        "--episodes",
+        type=int,
+        default=20,
+        help="episodes per scene and policy",
+    )
+    single_uav_collision_audit_parser.add_argument(
+        "--steps",
+        type=int,
+        default=None,
+        dest="max_steps",
+        help="override the frozen checkpoint episode horizon for this audit only",
+    )
+    single_uav_collision_audit_parser.add_argument(
+        "--seed",
+        type=int,
+        default=2026,
+    )
+    single_uav_collision_audit_parser.add_argument(
+        "--no-raw-action-replay",
+        action="store_true",
+        help="skip the execution-isolating raw-action replay",
+    )
+    single_uav_collision_audit_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="allow writing into the exact requested independent audit roots",
+    )
+    single_uav_collision_audit_parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="disable scene progress output",
+    )
+
+    single_uav_actor_constrained_parser = subparsers.add_parser(
+        "diagnose-single-uav-actor-constrained-oracle",
+        help="run a read-only Actor-action-constrained estimated-state oracle feasibility test",
+    )
+    single_uav_actor_constrained_parser.add_argument(
+        "--baseline-checkpoint",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_braking_progress025_seed2026/"
+            "scale_1/checkpoints/final.pt"
+        ),
+        help="original coef=0.25 baseline checkpoint",
+    )
+    single_uav_actor_constrained_parser.add_argument(
+        "--fine-tuned-checkpoint",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_navigation_preserving_finetune_seed2026/"
+            "scale_1/checkpoints/final.pt"
+        ),
+        help="navigation-preserving fine-tuned checkpoint",
+    )
+    single_uav_actor_constrained_parser.add_argument(
+        "--previous-audit",
+        type=Path,
+        default=Path("data/synthetic/single_uav_rl_equivalent_oracle_audit_seed2026"),
+        help="validated four-policy RL-equivalent oracle audit to reuse",
+    )
+    single_uav_actor_constrained_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/synthetic/single_uav_actor_constrained_oracle_seed2026"),
+        help="independent five-policy feasibility dataset root",
+    )
+    single_uav_actor_constrained_parser.add_argument(
+        "--logs-output",
+        type=Path,
+        default=None,
+        help="diagnostic CSV directory; defaults under logs/preliminary",
+    )
+    single_uav_actor_constrained_parser.add_argument(
+        "--plots-output",
+        type=Path,
+        default=None,
+        help="diagnostic plot directory; defaults under plots/preliminary",
+    )
+    single_uav_actor_constrained_parser.add_argument(
+        "--episodes",
+        type=int,
+        default=20,
+        help="paired normal far-distance episodes per policy",
+    )
+    single_uav_actor_constrained_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="replace only the exact requested feasibility output directories",
+    )
+    single_uav_actor_constrained_parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="disable per-episode progress output",
+    )
+
+    single_uav_demo_parser = subparsers.add_parser(
+        "generate-single-uav-oracle-demonstrations",
+        help="generate independent Actor-constrained estimated-state Oracle demonstrations",
+    )
+    single_uav_demo_parser.add_argument(
+        "--baseline-checkpoint",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_braking_progress025_seed2026/"
+            "scale_1/checkpoints/final.pt"
+        ),
+    )
+    single_uav_demo_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/synthetic/single_uav_oracle_demonstrations_seed2026"),
+    )
+    single_uav_demo_parser.add_argument("--logs-output", type=Path, default=None)
+    single_uav_demo_parser.add_argument("--train-episodes", type=int, default=48)
+    single_uav_demo_parser.add_argument("--validation-episodes", type=int, default=20)
+    single_uav_demo_parser.add_argument("--force", action="store_true")
+    single_uav_demo_parser.add_argument("--quiet", action="store_true")
+
+    single_uav_bc_train_parser = subparsers.add_parser(
+        "train-single-uav-behavior-cloning",
+        help="train Actor-only physical-action behavior cloning from Oracle demonstrations",
+    )
+    single_uav_bc_train_parser.add_argument(
+        "--baseline-checkpoint",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_braking_progress025_seed2026/"
+            "scale_1/checkpoints/final.pt"
+        ),
+    )
+    single_uav_bc_train_parser.add_argument(
+        "--demonstrations",
+        type=Path,
+        default=Path("data/synthetic/single_uav_oracle_demonstrations_seed2026"),
+    )
+    single_uav_bc_train_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/synthetic/single_uav_bc_oracle_seed2026"),
+    )
+    single_uav_bc_train_parser.add_argument("--logs-output", type=Path, default=None)
+    single_uav_bc_train_parser.add_argument("--plots-output", type=Path, default=None)
+    single_uav_bc_train_parser.add_argument("--epochs", type=int, default=12)
+    single_uav_bc_train_parser.add_argument("--batch-size", type=int, default=32)
+    single_uav_bc_train_parser.add_argument("--learning-rate", type=float, default=1.0e-4)
+    single_uav_bc_train_parser.add_argument("--seed", type=int, default=2026)
+    single_uav_bc_train_parser.add_argument("--force", action="store_true")
+    single_uav_bc_train_parser.add_argument("--quiet", action="store_true")
+
+    single_uav_bc_eval_parser = subparsers.add_parser(
+        "evaluate-single-uav-bc-only",
+        help="evaluate frozen baseline, fine-tuned, BC Actor, and Oracle policies",
+    )
+    single_uav_bc_eval_parser.add_argument(
+        "--baseline-checkpoint",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_braking_progress025_seed2026/"
+            "scale_1/checkpoints/final.pt"
+        ),
+    )
+    single_uav_bc_eval_parser.add_argument(
+        "--fine-tuned-checkpoint",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_navigation_preserving_finetune_seed2026/"
+            "scale_1/checkpoints/final.pt"
+        ),
+    )
+    single_uav_bc_eval_parser.add_argument(
+        "--bc-checkpoint",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_bc_oracle_seed2026/"
+            "scale_1/checkpoints/final.pt"
+        ),
+    )
+    single_uav_bc_eval_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/synthetic/single_uav_bc_only_evaluation_seed2026"),
+    )
+    single_uav_bc_eval_parser.add_argument("--logs-output", type=Path, default=None)
+    single_uav_bc_eval_parser.add_argument("--plots-output", type=Path, default=None)
+    single_uav_bc_eval_parser.add_argument("--validation-episodes", type=int, default=20)
+    single_uav_bc_eval_parser.add_argument("--test-episodes", type=int, default=20)
+    single_uav_bc_eval_parser.add_argument("--force", action="store_true")
+    single_uav_bc_eval_parser.add_argument("--quiet", action="store_true")
+
+    single_uav_bc_v2_train_parser = subparsers.add_parser(
+        "train-single-uav-bc-v2",
+        help="train longer Actor-only BC-v2 with validation early stopping",
+    )
+    single_uav_bc_v2_train_parser.add_argument(
+        "--initial-checkpoint",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_braking_progress025_seed2026/"
+            "scale_1/checkpoints/final.pt"
+        ),
+    )
+    single_uav_bc_v2_train_parser.add_argument(
+        "--demonstrations",
+        type=Path,
+        default=Path("data/synthetic/single_uav_oracle_demonstrations_seed2026"),
+    )
+    single_uav_bc_v2_train_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/synthetic/single_uav_bc_v2_oracle_seed2026"),
+    )
+    single_uav_bc_v2_train_parser.add_argument("--logs-output", type=Path, default=None)
+    single_uav_bc_v2_train_parser.add_argument("--plots-output", type=Path, default=None)
+    single_uav_bc_v2_train_parser.add_argument("--max-epochs", type=int, default=60)
+    single_uav_bc_v2_train_parser.add_argument("--patience", type=int, default=8)
+    single_uav_bc_v2_train_parser.add_argument("--batch-size", type=int, default=32)
+    single_uav_bc_v2_train_parser.add_argument("--learning-rate", type=float, default=1.0e-4)
+    single_uav_bc_v2_train_parser.add_argument("--seed", type=int, default=2026)
+    single_uav_bc_v2_train_parser.add_argument("--force", action="store_true")
+    single_uav_bc_v2_train_parser.add_argument("--quiet", action="store_true")
+
+    single_uav_bc_v2_eval_parser = subparsers.add_parser(
+        "evaluate-single-uav-bc-v2",
+        help="compare baseline, old BC, BC-v2 and estimated-state Oracle",
+    )
+    single_uav_bc_v2_eval_parser.add_argument(
+        "--baseline-checkpoint",
+        type=Path,
+        default=Path(
+            "data/synthetic/single_uav_braking_progress025_seed2026/"
+            "scale_1/checkpoints/final.pt"
+        ),
+    )
+    single_uav_bc_v2_eval_parser.add_argument(
+        "--old-bc-checkpoint",
+        type=Path,
+        default=Path("data/synthetic/single_uav_bc_oracle_seed2026/scale_1/checkpoints/final.pt"),
+    )
+    single_uav_bc_v2_eval_parser.add_argument(
+        "--bc-v2-checkpoint",
+        type=Path,
+        default=Path("data/synthetic/single_uav_bc_v2_oracle_seed2026/scale_1/checkpoints/best_validation.pt"),
+    )
+    single_uav_bc_v2_eval_parser.add_argument("--output", type=Path, default=Path("data/synthetic/single_uav_bc_v2_evaluation_seed2026"))
+    single_uav_bc_v2_eval_parser.add_argument("--logs-output", type=Path, default=None)
+    single_uav_bc_v2_eval_parser.add_argument("--plots-output", type=Path, default=None)
+    single_uav_bc_v2_eval_parser.add_argument("--validation-episodes", type=int, default=20)
+    single_uav_bc_v2_eval_parser.add_argument("--test-episodes", type=int, default=20)
+    single_uav_bc_v2_eval_parser.add_argument("--force", action="store_true")
+    single_uav_bc_v2_eval_parser.add_argument("--quiet", action="store_true")
+
+    single_uav_dagger_generate_parser = subparsers.add_parser(
+        "generate-single-uav-dagger-round1",
+        help="collect train-only BC-v2 visited states relabeled by the estimated-state Oracle",
+    )
+    single_uav_dagger_generate_parser.add_argument("--bc-v2-checkpoint", type=Path, default=Path("data/synthetic/single_uav_bc_v2_oracle_seed2026/scale_1/checkpoints/best_validation.pt"))
+    single_uav_dagger_generate_parser.add_argument("--original-demonstrations", type=Path, default=Path("data/synthetic/single_uav_oracle_demonstrations_seed2026"))
+    single_uav_dagger_generate_parser.add_argument("--output", type=Path, default=Path("data/synthetic/single_uav_dagger_round1_seed2026"))
+    single_uav_dagger_generate_parser.add_argument("--logs-output", type=Path, default=None)
+    single_uav_dagger_generate_parser.add_argument("--train-episodes", type=int, default=48)
+    single_uav_dagger_generate_parser.add_argument("--max-correction-samples", type=int, default=None)
+    single_uav_dagger_generate_parser.add_argument("--force", action="store_true")
+    single_uav_dagger_generate_parser.add_argument("--quiet", action="store_true")
+
+    single_uav_dagger_train_parser = subparsers.add_parser(
+        "train-single-uav-dagger-round1",
+        help="train Actor-only on the aggregated original plus DAgger dataset",
+    )
+    single_uav_dagger_train_parser.add_argument("--bc-v2-checkpoint", type=Path, default=Path("data/synthetic/single_uav_bc_v2_oracle_seed2026/scale_1/checkpoints/best_validation.pt"))
+    single_uav_dagger_train_parser.add_argument("--aggregated-demonstrations", type=Path, default=Path("data/synthetic/single_uav_dagger_round1_seed2026/aggregated_dataset"))
+    single_uav_dagger_train_parser.add_argument("--output", type=Path, default=Path("data/synthetic/single_uav_dagger_actor_seed2026"))
+    single_uav_dagger_train_parser.add_argument("--logs-output", type=Path, default=None)
+    single_uav_dagger_train_parser.add_argument("--plots-output", type=Path, default=None)
+    single_uav_dagger_train_parser.add_argument("--max-epochs", type=int, default=60)
+    single_uav_dagger_train_parser.add_argument("--patience", type=int, default=8)
+    single_uav_dagger_train_parser.add_argument("--batch-size", type=int, default=32)
+    single_uav_dagger_train_parser.add_argument("--learning-rate", type=float, default=1.0e-4)
+    single_uav_dagger_train_parser.add_argument("--seed", type=int, default=2026)
+    single_uav_dagger_train_parser.add_argument("--force", action="store_true")
+    single_uav_dagger_train_parser.add_argument("--quiet", action="store_true")
+
+    single_uav_dagger_eval_parser = subparsers.add_parser(
+        "evaluate-single-uav-dagger-round1",
+        help="compare baseline, old BC, BC-v2, DAgger Actor and estimated-state Oracle",
+    )
+    single_uav_dagger_eval_parser.add_argument("--baseline-checkpoint", type=Path, default=Path("data/synthetic/single_uav_braking_progress025_seed2026/scale_1/checkpoints/final.pt"))
+    single_uav_dagger_eval_parser.add_argument("--old-bc-checkpoint", type=Path, default=Path("data/synthetic/single_uav_bc_oracle_seed2026/scale_1/checkpoints/final.pt"))
+    single_uav_dagger_eval_parser.add_argument("--bc-v2-checkpoint", type=Path, default=Path("data/synthetic/single_uav_bc_v2_oracle_seed2026/scale_1/checkpoints/best_validation.pt"))
+    single_uav_dagger_eval_parser.add_argument("--dagger-checkpoint", type=Path, default=Path("data/synthetic/single_uav_dagger_actor_seed2026/scale_1/checkpoints/best_validation.pt"))
+    single_uav_dagger_eval_parser.add_argument("--output", type=Path, default=Path("data/synthetic/single_uav_dagger_evaluation_seed2026"))
+    single_uav_dagger_eval_parser.add_argument("--logs-output", type=Path, default=None)
+    single_uav_dagger_eval_parser.add_argument("--plots-output", type=Path, default=None)
+    single_uav_dagger_eval_parser.add_argument("--validation-episodes", type=int, default=20)
+    single_uav_dagger_eval_parser.add_argument("--test-episodes", type=int, default=20)
+    single_uav_dagger_eval_parser.add_argument("--force", action="store_true")
+    single_uav_dagger_eval_parser.add_argument("--quiet", action="store_true")
+
     preliminary_validate_parser = subparsers.add_parser(
         "validate-preliminary",
         help="validate every preliminary scale directory",
@@ -3200,6 +4143,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.single_uav_braking_acceleration_mps2
             ),
             single_uav_braking_margin_m=args.single_uav_braking_margin_m,
+            single_uav_braking_distance_speed_profile=(
+                args.single_uav_braking_distance_speed_profile
+            ),
             single_uav_stable_hold_steps=args.single_uav_stable_hold_steps,
             single_uav_goal_hold_reward=args.single_uav_goal_hold_reward,
             single_uav_speed_deficit_penalty_weight=args.single_uav_speed_deficit_penalty_weight,
@@ -3208,8 +4154,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             single_uav_target_velocity_action_reward_coef=(
                 args.single_uav_target_velocity_action_reward_coef
             ),
+            single_uav_terminal_braking_radius_m=(
+                args.single_uav_terminal_braking_radius_m
+            ),
+            single_uav_terminal_braking_reward_coef=(
+                args.single_uav_terminal_braking_reward_coef
+            ),
+            single_uav_terminal_acceleration_penalty_coef=(
+                args.single_uav_terminal_acceleration_penalty_coef
+            ),
+            single_uav_braking_progress_reward_coef=(
+                args.single_uav_braking_progress_reward_coef
+            ),
+            single_uav_terminal_radial_progress_reward_coef=(
+                args.single_uav_terminal_radial_progress_reward_coef
+            ),
+            single_uav_terminal_target_velocity_vector_reward_coef=(
+                args.single_uav_terminal_target_velocity_vector_reward_coef
+            ),
             single_uav_braking_curriculum_fraction=(
                 args.single_uav_braking_curriculum_fraction
+            ),
+            single_uav_terminal_braking_curriculum_fraction=(
+                args.single_uav_terminal_braking_curriculum_fraction
+            ),
+            single_uav_obstacle_direction_features_enabled=(
+                args.single_uav_obstacle_direction_features
             ),
             single_uav_braking_safety_projection_enabled=(
                 args.single_uav_braking_safety_projection
@@ -4652,6 +5622,352 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
         return 0
+    if args.command == "evaluate-single-uav-terminal-starts":
+        from .experiments.single_uav_checkpoint_evaluation import (
+            evaluate_frozen_single_uav_checkpoint,
+        )
+
+        summary = evaluate_frozen_single_uav_checkpoint(
+            args.checkpoint,
+            output_dir=args.output,
+            logs_dir=args.logs_output,
+            plots_dir=args.plots_output,
+            episodes_per_group=args.episodes_per_group,
+            force=args.force,
+            progress=not args.quiet,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+        return 0 if summary.get("schema_validation", {}).get("ok", False) else 1
+    if args.command == "run-single-uav-navigation-preserving-finetune":
+        from .experiments.single_uav_navigation_preserving_finetune import (
+            run_navigation_preserving_finetune,
+        )
+
+        summary = run_navigation_preserving_finetune(
+            args.baseline_checkpoint,
+            baseline_verify_output=args.baseline_verify_output,
+            baseline_verify_logs=args.baseline_verify_logs,
+            baseline_verify_plots=args.baseline_verify_plots,
+            smoke_output=args.smoke_output,
+            smoke_logs=args.smoke_logs,
+            smoke_plots=args.smoke_plots,
+            output_dir=args.output,
+            logs_dir=args.logs_output,
+            plots_dir=args.plots_output,
+            smoke_train_episodes=args.smoke_train_episodes,
+            smoke_validation_episodes=args.smoke_validation_episodes,
+            smoke_test_episodes=args.smoke_test_episodes,
+            train_episodes=args.train_episodes,
+            validation_episodes=args.validation_episodes,
+            test_episodes=args.test_episodes,
+            speed_profile=args.single_uav_braking_distance_speed_profile,
+            terminal_radial_progress_reward_coef=(
+                args.single_uav_terminal_radial_progress_reward_coef
+            ),
+            terminal_target_velocity_vector_reward_coef=(
+                args.single_uav_terminal_target_velocity_vector_reward_coef
+            ),
+            terminal_target_velocity_vector_radial_gate_enabled=(
+                args.single_uav_terminal_target_velocity_vector_radial_gate_enabled
+            ),
+            force=args.force,
+            progress=not args.quiet,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+        return 0 if summary.get("status") == "completed" else 1
+    if args.command == "diagnose-single-uav-terminal-approach":
+        from .experiments.single_uav_terminal_approach_diagnostic import (
+            evaluate_terminal_approach_diagnostic,
+        )
+
+        summary = evaluate_terminal_approach_diagnostic(
+            args.baseline_checkpoint,
+            args.fine_tuned_checkpoint,
+            output_dir=args.output,
+            logs_dir=args.logs_output,
+            plots_dir=args.plots_output,
+            episodes=args.episodes,
+            force=args.force,
+            progress=not args.quiet,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+        return 0 if summary.get("schema_validation", {}).get("ok", False) else 1
+    if args.command == "diagnose-single-uav-terminal-velocity-vector":
+        from .experiments.single_uav_terminal_velocity_vector_diagnostic import (
+            evaluate_c_vs_d_terminal_velocity_vector_diagnostic,
+        )
+
+        summary = evaluate_c_vs_d_terminal_velocity_vector_diagnostic(
+            args.c_checkpoint,
+            args.d_checkpoint,
+            output_dir=args.output,
+            logs_dir=args.logs_output,
+            plots_dir=args.plots_output,
+            episodes=args.episodes,
+            force=args.force,
+            progress=not args.quiet,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+        return 0 if summary.get("schema_validation_ok", False) and summary.get("read_only_ok", False) else 1
+    if args.command == "compare-single-uav-acde":
+        from .experiments.single_uav_acde_comparison import build_acde_comparison
+
+        summary = build_acde_comparison(
+            baseline_root=args.baseline_root,
+            c_root=args.c_root,
+            d_root=args.d_root,
+            e_root=args.e_root,
+            output_logs=args.logs_output,
+            output_plots=args.plots_output,
+            force=args.force,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+        return 0 if summary.get("schema_validation", {}).get("ok", False) else 1
+    if args.command == "compare-single-uav-acef":
+        from .experiments.single_uav_acef_comparison import build_acef_comparison
+
+        summary = build_acef_comparison(
+            baseline_root=args.baseline_root,
+            c_root=args.c_root,
+            e_root=args.e_root,
+            f_root=args.f_root,
+            output_logs=args.logs_output,
+            output_plots=args.plots_output,
+            force=args.force,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+        return 0 if summary.get("schema_validation", {}).get("ok", False) else 1
+    if args.command == "diagnose-single-uav-scripted-feasibility":
+        from .experiments.single_uav_scripted_feasibility import (
+            evaluate_scripted_single_uav_feasibility,
+        )
+
+        summary = evaluate_scripted_single_uav_feasibility(
+            args.baseline_checkpoint,
+            args.fine_tuned_checkpoint,
+            output_dir=args.output,
+            logs_dir=args.logs_output,
+            plots_dir=args.plots_output,
+            episodes=args.episodes,
+            sanity_episodes=args.sanity_episodes,
+            force=args.force,
+            progress=not args.quiet,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+        return 0 if summary.get("overall_schema_ok", False) else 1
+    if args.command == "diagnose-single-uav-rl-equivalent-oracle-audit":
+        from .experiments.single_uav_rl_equivalent_oracle_audit import (
+            evaluate_single_uav_rl_equivalent_oracle_audit,
+        )
+
+        summary = evaluate_single_uav_rl_equivalent_oracle_audit(
+            args.baseline_checkpoint,
+            args.fine_tuned_checkpoint,
+            output_dir=args.output,
+            logs_dir=args.logs_output,
+            plots_dir=args.plots_output,
+            episodes=args.episodes,
+            force=args.force,
+            progress=not args.quiet,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+        return 0 if summary.get("overall_schema_ok", False) else 1
+    if args.command == "diagnose-single-uav-collision-attribution":
+        from .experiments.single_uav_collision_attribution_audit import (
+            run_collision_attribution_audit,
+        )
+
+        if args.episodes < 1:
+            parser.error("--episodes must be positive")
+        if args.max_steps is not None and args.max_steps < 1:
+            parser.error("--steps must be positive")
+        summary = run_collision_attribution_audit(
+            baseline_checkpoint=args.baseline_checkpoint,
+            dagger_checkpoint=args.dagger_checkpoint,
+            hierarchical_checkpoint=args.hierarchical_checkpoint,
+            output_dir=args.output,
+            logs_dir=args.logs_output,
+            plots_dir=args.plots_output,
+            episodes=args.episodes,
+            max_steps=args.max_steps,
+            seed=args.seed,
+            include_raw_action_replay=not args.no_raw_action_replay,
+            force=args.force,
+            progress=not args.quiet,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+        return 0 if bool(summary.get("audit_ok", False)) else 1
+    if args.command == "diagnose-single-uav-actor-constrained-oracle":
+        from .experiments.single_uav_actor_constrained_oracle import (
+            evaluate_actor_constrained_oracle_feasibility,
+        )
+
+        summary = evaluate_actor_constrained_oracle_feasibility(
+            args.baseline_checkpoint,
+            args.fine_tuned_checkpoint,
+            previous_audit_dir=args.previous_audit,
+            output_dir=args.output,
+            logs_dir=args.logs_output,
+            plots_dir=args.plots_output,
+            episodes=args.episodes,
+            force=args.force,
+            progress=not args.quiet,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+        return 0 if summary.get("overall_schema_ok", False) else 1
+    if args.command == "generate-single-uav-oracle-demonstrations":
+        from .experiments.single_uav_oracle_behavior_cloning import (
+            generate_oracle_demonstrations,
+        )
+
+        summary = generate_oracle_demonstrations(
+            args.baseline_checkpoint,
+            output_dir=args.output,
+            logs_dir=args.logs_output,
+            train_episodes=args.train_episodes,
+            validation_episodes=args.validation_episodes,
+            force=args.force,
+            progress=not args.quiet,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+        return 0 if summary.get("schema_validation", {}).get("ok", False) else 1
+    if args.command == "train-single-uav-behavior-cloning":
+        from .experiments.single_uav_oracle_behavior_cloning import (
+            train_behavior_cloning,
+        )
+
+        summary = train_behavior_cloning(
+            args.baseline_checkpoint,
+            args.demonstrations,
+            output_dir=args.output,
+            logs_dir=args.logs_output,
+            plots_dir=args.plots_output,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            learning_rate=args.learning_rate,
+            seed=args.seed,
+            force=args.force,
+            progress=not args.quiet,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+        return 0 if bool(summary.get("bc_contract", {}).get("ppo_update_performed") is False) else 1
+    if args.command == "evaluate-single-uav-bc-only":
+        from .experiments.single_uav_oracle_behavior_cloning import evaluate_bc_only
+
+        summary = evaluate_bc_only(
+            args.baseline_checkpoint,
+            args.fine_tuned_checkpoint,
+            args.bc_checkpoint,
+            output_dir=args.output,
+            logs_dir=args.logs_output,
+            plots_dir=args.plots_output,
+            validation_episodes=args.validation_episodes,
+            test_episodes=args.test_episodes,
+            force=args.force,
+            progress=not args.quiet,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+        return 0 if all(
+            bool(report.get("schema_validation", {}).get("ok", False))
+            for split_reports in summary.get("role_reports", {}).values()
+            for report in split_reports.values()
+        ) else 1
+    if args.command == "train-single-uav-bc-v2":
+        from .experiments.single_uav_bc_v2_dagger import train_behavior_cloning_v2
+
+        summary = train_behavior_cloning_v2(
+            args.initial_checkpoint,
+            args.demonstrations,
+            output_dir=args.output,
+            logs_dir=args.logs_output,
+            plots_dir=args.plots_output,
+            max_epochs=args.max_epochs,
+            patience=args.patience,
+            batch_size=args.batch_size,
+            learning_rate=args.learning_rate,
+            seed=args.seed,
+            force=args.force,
+            progress=not args.quiet,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+        return 0 if bool(summary.get("bc_contract", {}).get("ppo_update_performed") is False) else 1
+    if args.command == "evaluate-single-uav-bc-v2":
+        from .experiments.single_uav_bc_v2_dagger import evaluate_imitation_policies
+
+        summary = evaluate_imitation_policies(
+            args.baseline_checkpoint,
+            args.old_bc_checkpoint,
+            args.bc_v2_checkpoint,
+            output_dir=args.output,
+            logs_dir=args.logs_output,
+            plots_dir=args.plots_output,
+            validation_episodes=args.validation_episodes,
+            test_episodes=args.test_episodes,
+            force=args.force,
+            progress=not args.quiet,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+        return 0 if all(
+            bool(report.get("schema_validation", {}).get("ok", False))
+            for split_reports in summary.get("role_reports", {}).values()
+            for report in split_reports.values()
+        ) else 1
+    if args.command == "generate-single-uav-dagger-round1":
+        from .experiments.single_uav_bc_v2_dagger import generate_dagger_corrections
+
+        summary = generate_dagger_corrections(
+            args.bc_v2_checkpoint,
+            args.original_demonstrations,
+            output_dir=args.output,
+            logs_dir=args.logs_output,
+            train_episodes=args.train_episodes,
+            max_correction_samples=args.max_correction_samples,
+            force=args.force,
+            progress=not args.quiet,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+        return 0 if bool(summary.get("schema_validation", {}).get("ok", False)) else 1
+    if args.command == "train-single-uav-dagger-round1":
+        from .experiments.single_uav_bc_v2_dagger import train_dagger_actor
+
+        summary = train_dagger_actor(
+            args.bc_v2_checkpoint,
+            args.aggregated_demonstrations,
+            output_dir=args.output,
+            logs_dir=args.logs_output,
+            plots_dir=args.plots_output,
+            max_epochs=args.max_epochs,
+            patience=args.patience,
+            batch_size=args.batch_size,
+            learning_rate=args.learning_rate,
+            seed=args.seed,
+            force=args.force,
+            progress=not args.quiet,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+        return 0 if bool(summary.get("bc_contract", {}).get("ppo_update_performed") is False) else 1
+    if args.command == "evaluate-single-uav-dagger-round1":
+        from .experiments.single_uav_bc_v2_dagger import evaluate_imitation_policies
+
+        summary = evaluate_imitation_policies(
+            args.baseline_checkpoint,
+            args.old_bc_checkpoint,
+            args.bc_v2_checkpoint,
+            dagger_checkpoint=args.dagger_checkpoint,
+            output_dir=args.output,
+            logs_dir=args.logs_output,
+            plots_dir=args.plots_output,
+            validation_episodes=args.validation_episodes,
+            test_episodes=args.test_episodes,
+            force=args.force,
+            progress=not args.quiet,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+        return 0 if all(
+            bool(report.get("schema_validation", {}).get("ok", False))
+            for split_reports in summary.get("role_reports", {}).values()
+            for report in split_reports.values()
+        ) else 1
     if args.command == "validate-preliminary":
         from .experiments.formal import validate_preliminary
 

@@ -17,6 +17,23 @@
 
 ## 当前状态
 
+### 单 UAV 静态障碍物主动避障阶段 1 Smoke（2026-09-13）
+
+已新增独立入口 `src/experiments/single_uav_static_obstacle_avoidance.py`，从
+`single_uav_braking_progress025_seed2026` 的 baseline checkpoint 初始化，保持原有动力学、动作空间、PPO/MAPPO 参数、稳定到达判据和 safety execution 不变。训练 Smoke 使用 30 个 episode，实际调度为 21 个 normal full-distance 与 9 个 static pressure（70%/30%）；静态奖励是可选且默认关闭的独立接口，本次训练仅在静态场景中按原始候选动作的 swept clearance 计算，未使用 safety projection 后的位置。
+
+静态压力 sanity 使用相同场景和动作轨迹进行了 safety-on/off 配对：safety-off 出现 1 个 pre-candidate unsafe step 和 1 个碰撞 step，safety-on 出现 1 个安全投影 step且碰撞为 0，压力门控通过。Smoke 的 5 个 normal validation 与 5 个 normal test 均保持 curriculum-free；normal test 为 5/5 进入 8 m、1/5 进入 1 m，静态 holdout 暂未产生碰撞或安全投影。`validate_preliminary` 为 `ok=true`，项目 `tests/` 为 `418 passed, 5 skipped`。这些是工程链路和压力场景验证结果，不足以证明策略已经学会泛化的主动绕障。
+
+静态阶段 1 正式 `100 train / 20 validation / 20 test` 实验已在 Smoke 通过版本上完成；训练实际为 `70% normal + 30% static pressure`，validation/test 分别包含 20 个 normal full-distance 与 20 个 static-obstacle holdout。正式 normal test 为 `20/20` 进入 8 m、`0/20` 进入 1 m、`0/20` stable；static test 为 `20/20` pre-risk、`1316` 个 safety projection step、`0/20` collision，且未进入 8 m。这保护了远距离导航，但尚未证明策略学会主动绕过静态障碍物；static holdout 的 `collision=0` 主要来自安全执行层介入。
+
+阶段 1 输出目录：
+
+```text
+data/synthetic/single_uav_static_obstacle_avoidance_stage1_seed2026/
+logs/preliminary/single_uav_static_obstacle_avoidance_stage1_seed2026/
+plots/preliminary/single_uav_static_obstacle_avoidance_stage1_seed2026/
+```
+
 ### 实验产物清理（2026-09-09）
 
 已清理 2026-09-02 00:00 至 2026-09-07 12:00 期间生成的 `data/`、`logs/`、`plots/` 实验文件及对应 Python 缓存，共 235,186 个文件、约 54.11 GB。`src/`、`tests/`、`sections/`、入口文件、配置、知识库和答辩文档未删除。历史实验输出不再作为当前运行的隐式依赖；若版本化 manifest 不存在，实验模板使用显式的 3-UAV 默认配置构造，保证清理后代码仍可执行。
@@ -2597,3 +2614,1484 @@ plots/preliminary/single_uav_nav_goal_v2_boundary_seed2026/
 新实验的 manifest/schema 校验通过；针对性边界测试 `22 passed`，全量回归测试 `357 passed, 5 skipped`。
 当前结果属于单种子、固定场景的机制验证，下一步若要提升导航效果，应再做权重敏感性或更合理的训练场景，
 但不应把这次 `0.5` 边界惩罚结果直接作为多 UAV 协同结论。
+
+#### 单 UAV 稳定到达退出验证与双轨基线（2026-09-11）
+
+本轮按照“单 UAV 稳定到达验证”方案，在固定场景、100 steps/回合、100/20/20 个
+训练/validation/test 回合下，运行了完全相同配置的两条轨道。主线为原始 PPO 动作，
+对照线仅额外启用低层制动安全投影；两条轨道均显式设置 `boundary_penalty_weight=0`，
+因此没有把边界惩罚混入本轮基线。
+
+```text
+data/synthetic/single_uav_exit_raw_seed2026/
+logs/preliminary/single_uav_exit_raw_seed2026/
+plots/preliminary/single_uav_exit_raw_seed2026/
+
+data/synthetic/single_uav_exit_safety_seed2026/
+logs/preliminary/single_uav_exit_safety_seed2026/
+plots/preliminary/single_uav_exit_safety_seed2026/
+```
+
+测试集结果为：
+
+```text
+                         原始 PPO       安全投影
+进入 8 m                  20/20          20/20
+进入 1 m                   0/20           3/20
+稳定到达                   0/20           3/20
+最小目标距离               3.230 m        0.811 m
+近目标进入时平均速度       3.283 m/s      2.697 m/s
+近目标平均速度             3.829 m/s      2.488 m/s
+近目标平均实际减速         N/A            0.259 m/s
+安全层制动投影次数         0              209
+碰撞回合数                 0              0
+```
+
+结果说明：原始 PPO 已经能够稳定进入近目标区域，但没有自主进入 `1 m` 目标范围，
+近目标平均速度反而高于进入时速度，说明 PPO 尚未学会持续减速。安全投影改善了末端捕获，
+但测试中仍有 `17/20` 回合没有稳定到达，而且有 209 个测试动作经过安全层修正，不能把
+`3/20` 的成功完全归因于 PPO。
+
+本轮 smoke 实验、两条完整实验的 `validate-preliminary` 均通过；完整回归测试为
+`357 passed, 5 skipped`。重新生成的导航分析已经给出有限的制动统计值，旧实验中出现的
+NaN 汇总属于历史分析文件未重新生成，不是当前动作日志缺失。
+
+由于原始 PPO 尚未达到“近目标进入率约 80%、稳定到达率约 70%--80%、至少 3 个种子可重复”
+的退出门槛，本轮不继续运行多种子，也不进入 2 UAV 通信实验。当前研究结论是：动作空间和
+执行层具备制动能力，但学习策略仍未形成可重复的“接近目标--减速--进入目标--稳定保持”闭环。
+
+#### 单 UAV 制动课程训练执行（2026-09-11）
+
+针对上述“原始 PPO 不自主产生制动动作”的问题，本轮启用已有的训练制动课程：训练阶段以 `0.4`
+的比例交错加入距离目标 `3/5/8 m`、初始速度高于允许目标速度的局部制动回合；validation/test
+仍保持原固定远距离起点。安全投影未启用，边界惩罚保持为 `0`，因此测试中的制动行为来自原始 PPO。
+同时保留 `braking_distance` 目标速度、制动动作奖励和目标速度动作匹配奖励，并将稳定保持设为 `5` 步。
+
+```text
+data/synthetic/single_uav_braking_curriculum40_seed2026/
+logs/preliminary/single_uav_braking_curriculum40_seed2026/
+plots/preliminary/single_uav_braking_curriculum40_seed2026/
+```
+
+完整实验配置为固定 `seed=2026`、固定 `scenario_seed=2026`、100 steps/回合、100/20/20 个
+训练/validation/test 回合。结果如下：
+
+```text
+                                      train        validation       test
+进入 8 m                              44/100        19/20          19/20
+进入 1 m                              40/100         0/20           1/20
+稳定到达                              1/100         0/20           0/20
+近目标制动动作比例                    59.3%         60.3%          65.7%
+近目标有效制动比例                    97.8%         98.1%          97.2%
+近目标平均速度下降                    0.102 m/s     0.044 m/s       0.046 m/s
+测试最小目标距离                      --            --             0.717 m
+安全投影                              关闭          关闭           关闭
+```
+
+结果表明，制动课程确实解决了“原始 PPO 完全不选择制动动作”的问题：测试近目标动作中约
+`65.7%` 为制动动作，且其中约 `97.2%` 能产生实际速度下降；测试近目标平均速度也从进入时约
+`2.42 m/s` 降至约 `1.86 m/s`。但是只有 `1/20` 回合进入 `1 m`，且没有回合同时满足速度
+不超过 `0.5 m/s` 并连续保持 `5` 步。因此当前策略已经从“不会自主刹车”进展到“能够自主刹车”，
+但仍未形成稳定的末端停车策略。
+
+本轮 `validate-preliminary` 通过；制动课程与导航分析针对性测试为 `3 passed`。下一步应继续
+针对“减速幅度不足和目标附近保持”进行单因素修改，不应把本轮结果作为单 UAV 稳定到达退出证据，
+也不应据此进入 2 UAV 通信实验。
+
+#### 单 UAV 末端制动课程与局部奖励执行（2026-09-11）
+
+本轮执行上一阶段提出的末端制动方案：保留已有 `3/5/8 m` 制动课程，在原五回合调度中增加未占用的
+`1.5/2/3 m` 训练起点；同时在目标最后 `3 m` 内新增两条可关闭的 learning-only 信号：实际降低速度时
+给予 `terminal_braking_reward`，在超速状态继续沿目标方向加速时给予
+`terminal_acceleration_penalty`。reporting reward、通信/定位物理指标、验证/测试起点和安全投影均未改变。
+新增字段已经写入 `rewards.csv`、schema、episode summary 和 manifest，默认系数为 `0`，因此不影响历史配置。
+
+本轮实验使用固定 `seed=2026`、固定 `scenario_seed=2026`、1 UAV、100 steps/回合、100/20/20 个
+训练/validation/test 回合；新增末端课程比例为 `0.2`，实际减速奖励系数为 `3.0`，超速继续加速惩罚系数为
+`2.0`，末端半径为 `3 m`。产物为：
+
+```text
+data/synthetic/single_uav_terminal_braking_seed2026/
+logs/preliminary/single_uav_terminal_braking_seed2026/
+plots/preliminary/single_uav_terminal_braking_seed2026/
+```
+
+结果如下：
+
+```text
+                                      train        validation       test
+进入 8 m                              60/100         0/20           0/20
+进入 1 m                              59/100         0/20           0/20
+稳定到达                              3/100         0/20           0/20
+最小目标距离                          0.103 m       10.162 m       10.155 m
+末端奖励触发的 step                   1053           0              0
+安全投影                              关闭          关闭           关闭
+```
+
+训练日志证明新增信号确实生效：末端区域内平均实际减速信号约 `0.136`，累计末端减速奖励约 `390.88`，
+累计继续加速惩罚约 `85.62`。但 validation/test 完全没有进入 `3 m`，因此新信号没有机会在评估阶段直接
+发挥作用；更重要的是，策略从原上一轮的 validation/test 进入 `8 m` 为 `19/20` 退化为 `0/20`。这说明
+本轮“末端起点课程 + 末端局部奖励”的组合使策略过度适应局部制动起点，破坏了从原始远距离起点进行目标
+导航的泛化，不能作为主线改进结果，也不能作为“已学会稳定停车”的证据。
+
+因此本轮结论是：代码接口和日志链路正确，但算法结果不接受为改进。下一轮应采用严格的消融顺序，先固定
+已有制动课程，只单独比较末端局部奖励开/关；若局部奖励本身无害，再单独降低末端课程比例并比较，不能
+同时改变两项。当前输出保留为失败/消融对照，不覆盖上一轮基线，也不进入 2 UAV 通信实验。
+
+本轮针对性测试为 `15 passed`，项目完整回归测试为 `359 passed, 5 skipped`；另修复了当前 Matplotlib 版本
+下安全筛选图 `boxplot(labels=...)` 的兼容性参数，改为 `tick_labels=...`。`validate-preliminary` 返回
+`ok: true`。
+
+#### 单 UAV 超速误差下降奖励单因素实验（2026-09-11）
+
+按照“先固定已有制动课程，再单独增强超速误差反馈”的方案，本轮只新增
+`single_uav_braking_progress_reward_coef=3.0`。该项奖励计算
+`max(0, v_pre-v_target)-max(0, v_post-v_target)`，因此只有实际降低距离相关超速误差时才得到正反馈；
+超速误差变大时得到负反馈。已有 `3/5/8 m` 制动课程保持为 `0.4`，末端 `1.5/2/3 m` 课程保持为 `0`，
+安全投影保持关闭，其他训练、场景和物理参数均与上一轮 `single_uav_braking_curriculum40_seed2026`
+一致。新增前后超速误差、归一化信号和奖励字段写入 `rewards.csv`、schema 和 manifest。
+
+正式运行命令为：
+
+```text
+run-preliminary --output data/synthetic/single_uav_braking_progress3_seed2026 --uav-counts 1 --seed 2026 --scenario-seed 2026 --steps 100 --warmup-episodes 10 --train-episodes 100 --validation-episodes 20 --test-episodes 20 --single-uav-learning-mode loc_goal_v2 --single-uav-speed-control-mode braking_distance --single-uav-near-goal-radius-m 8.0 --single-uav-near-goal-speed-penalty-weight 0.4 --single-uav-target-speed-far-mps 6.0 --single-uav-braking-action-reward-coef 3.0 --single-uav-target-velocity-action-reward-coef 3.0 --single-uav-braking-progress-reward-coef 3.0 --single-uav-stable-hold-steps 5 --single-uav-braking-curriculum-fraction 0.4 --learning-reward-clip 3.0 --device cpu --force
+```
+
+产物为：
+
+```text
+data/synthetic/single_uav_braking_progress3_seed2026/
+logs/preliminary/single_uav_braking_progress3_seed2026/
+plots/preliminary/single_uav_braking_progress3_seed2026/
+```
+
+与上一轮仅有制动课程的结果对比如下：
+
+```text
+                                      仅制动课程          新增超速误差下降奖励
+测试进入 8 m                         19/20 (95%)        17/20 (85%)
+测试进入 1 m                          1/20 (5%)          0/20 (0%)
+测试稳定到达                         0/20 (0%)          0/20 (0%)
+测试最小目标距离                     0.717 m             4.066 m
+测试近目标平均速度                   1.863 m/s           1.254 m/s
+测试近目标平均超速                   0.243 m/s           0.000 m/s
+```
+
+结论是：该项奖励确实降低了近目标速度并消除了测试集近目标超速，但同时削弱了继续向目标推进的能力，
+因此没有改善 `1 m` 进入率或稳定到达率，不能作为主线改进结果。它证明了“速度反馈”和“目标推进”之间
+存在权衡；下一步应在保持制动课程不变的前提下，将该系数降低到较小值做单因素灵敏度比较，或增加
+一个独立的近目标进度保持项，不能再次同时加入末端课程。末端制动课程接口仍可单独用于后续消融，
+但不应与本轮结果混合解释。
+
+本轮 smoke 和正式实验的 `validate-preliminary` 均返回 `ok: true`；新增制动课程与奖励测试共 `16 passed`。
+本轮仍未满足单 UAV 稳定到达退出条件，因此不进入 2 UAV 通信实验。
+
+#### 单 UAV 超速误差奖励权重扫描（2026-09-11）
+
+在保持其他参数完全不变的前提下，补充完成 `single_uav_braking_progress_reward_coef=0.5` 和 `1.0`
+两组正式实验，并与已有的 `0`、`3.0` 两组统一比较。四组均为固定 `seed=2026`、固定
+`scenario_seed=2026`、1 UAV、100 steps/回合、100/20/20 个训练/validation/test 回合；已有 `3/5/8 m`
+制动课程为 `0.4`，末端停车课程为 `0`，安全投影关闭。
+
+统一测试结果如下：
+
+```text
+coef       进入 8 m       进入 1 m       稳定到达       最小目标距离       近目标平均速度       平均超速
+0          19/20 (95%)   1/20 (5%)     0/20 (0%)      0.717 m           1.863 m/s           0.243 m/s
+0.5        19/20 (95%)   1/20 (5%)     0/20 (0%)      0.158 m           1.959 m/s           0.221 m/s
+1.0        19/20 (95%)   0/20 (0%)     0/20 (0%)      1.127 m           1.595 m/s           0.240 m/s
+3.0        17/20 (85%)   0/20 (0%)     0/20 (0%)      4.066 m           1.254 m/s           0.000 m/s
+```
+
+按照“先保持远距离导航，再改善近目标到达”的预先规则，当前单种子筛选选择 `coef=0.5`：它保持了
+`19/20` 的 `8 m` 进入率和 `1/20` 的 `1 m` 进入率，同时将最小目标距离由 `0.717 m` 降至约 `0.158 m`，
+并略微降低平均超速。`coef=1.0` 虽然近目标平均速度更低，但测试未进入 `1 m`；`coef=3.0` 则明显
+损害远距离导航。因此 `0.5` 是当前较平衡的候选权重，但还不能称为最终最优参数，因为四组目前都为
+单随机种子，稳定到达率仍为 `0/20`。
+
+四组正式结果的统一汇总保存于：
+
+```text
+logs/preliminary/single_uav_braking_progress_sweep_seed2026.csv
+```
+
+本轮两组新增实验的 `validate-preliminary` 均返回 `ok: true`。下一步应固定 `coef=0.5`，使用至少
+`2026、3035、4044` 三个随机种子重复验证；若多种子仍能保持导航并改善近目标距离，再单独研究停车保持
+课程。当前仍不进入 2 UAV 通信实验。
+
+#### 单 UAV 超速误差奖励权重补测（2026-09-11）
+
+在保持上一轮权重扫描的所有条件不变的前提下，补测
+`single_uav_braking_progress_reward_coef=0.25、0.75、1.5`。三组均为固定
+`seed=2026`、固定 `scenario_seed=2026`、1 UAV、100 steps/回合、100/20/20 个训练/validation/test
+回合；`3/5/8 m` 制动课程为 `0.4`，末端停车课程为 `0`，安全投影关闭。三组均独立写入各自目录，未覆盖
+已有 `0、0.5、1.0、3.0` 结果。
+
+新增三组的统一结果如下：
+
+```text
+coef       split       进入 8 m       进入 1 m       稳定到达       最小目标距离       近目标平均速度       平均超速
+0.25       validation  19/20 (95%)   0/20 (0%)     0/20 (0%)      1.091 m           1.951 m/s           0.311 m/s
+0.25       test        20/20 (100%)  1/20 (5%)     0/20 (0%)      0.468 m           1.896 m/s           0.308 m/s
+0.75       validation  11/20 (55%)   0/20 (0%)     0/20 (0%)      2.273 m           2.055 m/s           0.028 m/s
+0.75       test        9/20 (45%)    0/20 (0%)     0/20 (0%)      3.694 m           1.988 m/s           0.022 m/s
+1.5        validation  1/20 (5%)     0/20 (0%)     0/20 (0%)      6.984 m           1.544 m/s           0.000 m/s
+1.5        test        2/20 (10%)    0/20 (0%)     0/20 (0%)      2.897 m           1.780 m/s           0.236 m/s
+```
+
+结果表明，`coef=0.25` 是三组补测中最平衡的候选：测试进入 `8 m` 达到 `20/20`，进入 `1 m` 为
+`1/20`，最小目标距离为 `0.468 m`。但它仍未产生稳定到达，因此不能单独证明已学会停车。`coef=0.75`
+开始明显损害远距离目标导航，`coef=1.5` 更严重；虽然近目标超速在部分评估样本中降低，但主要原因是
+策略很少进入近目标区域，不能把“超速变小”解释为制动能力真正改善。
+
+三组新增实验的完整产物分别位于：
+
+```text
+data/synthetic/single_uav_braking_progress025_seed2026/
+logs/preliminary/single_uav_braking_progress025_seed2026/
+plots/preliminary/single_uav_braking_progress025_seed2026/
+
+data/synthetic/single_uav_braking_progress075_seed2026/
+logs/preliminary/single_uav_braking_progress075_seed2026/
+plots/preliminary/single_uav_braking_progress075_seed2026/
+
+data/synthetic/single_uav_braking_progress15_seed2026/
+logs/preliminary/single_uav_braking_progress15_seed2026/
+plots/preliminary/single_uav_braking_progress15_seed2026/
+```
+
+七个系数的 validation/test 统一汇总保存于：
+
+```text
+logs/preliminary/single_uav_braking_progress_sweep_extended_seed2026.csv
+```
+
+三组新增目录的 `validate-preliminary` 均返回 `ok: true`。当前仍不能把任何系数称为最终权重；下一步应
+优先对 `0.25` 与已有 `0.5` 做多随机种子复验，随后再固定候选系数研究停车保持课程，而不是继续盲目扩大
+超速误差奖励系数。
+
+#### 单 UAV 终端接近/停车保持课程接口 smoke（2026-09-11，旧版调度）
+
+本轮只在当前 `coef=0.25` 基线之上新增
+`single_uav_terminal_braking_curriculum_fraction=0.30`，未启用 goal hold reward，未修改 braking reward、
+`stable_hold_steps=5`、动力学、动作空间、安全投影或 PPO 参数，也未改变 validation/test。实现复用了现有的
+`_apply_single_uav_braking_curriculum` 终端分支。
+
+上一版 smoke 使用了 4 个 standard、3 个 terminal、3 个原始远距离槽位；这相当于把 terminal 预算叠加在原有
+`0.4` 课程之上。该结果保留为历史接口验证记录，但不再作为当前调度方案。
+
+terminal 起点按训练进度经过 `1.5–3 m`、`3–5 m`、`5–8 m` 三阶段，每阶段使用确定性的代表距离，不引入额外
+随机起点因素。terminal 分支仅在 train phase 生效，warm-up、validation 和 test 不使用 terminal 起点。
+
+导航分析复用了已有的 `single_uav_stable_steps`，新增每回合及 split 汇总指标
+`maximum_consecutive_goal_hold_steps`，并保留 `maximum_stable_steps` 兼容旧输出。
+
+针对性单元测试结果为 `17 passed`。短 smoke 输出位于：
+
+```text
+data/synthetic/single_uav_terminal_curriculum30_coef025_smoke_seed2026/
+logs/preliminary/single_uav_terminal_curriculum30_coef025_smoke_seed2026/
+plots/preliminary/single_uav_terminal_curriculum30_coef025_smoke_seed2026/
+```
+
+该 smoke 的 `validate-preliminary` 返回 `ok: true`；训练 30 回合实际记录为 12 个 standard、9 个 terminal、
+9 个原始远距离回合，terminal 三个阶段均有样本。以上仅记录代码链路、课程分配和日志诊断是否正常，暂不据此
+下研究结论。
+
+#### 单 UAV 终端课程预算内调度修正 smoke（2026-09-11）
+
+本轮只修改课程 episode 的调度分配逻辑：保持 `coef=0.25`、`braking_curriculum_fraction=0.4`、
+`terminal_braking_curriculum_fraction=0.3` 以及其余奖励、动力学、动作空间、安全投影、PPO/MAPPO 参数不变。
+终端课程不再叠加到原有课程之外，而是放入原有 `0.4` 总预算内部。
+
+当前 10 回合槽位为：6 个 normal far-distance、1 个 standard braking、3 个 terminal；因此目标比例为
+`60% / 10% / 30%`。30-train smoke 的实际数量为：
+
+```text
+normal far-distance       18/30 = 60%
+standard braking           3/30 = 10%
+terminal                   9/30 = 30%
+```
+
+terminal 三个距离阶段 `0/1/2` 均有样本，terminal 初速度仍为非静止主动制动起步。validation/test 均无课程元数据，
+且与已有 `coef=0.25` 基线的 validation/test 初始位置、速度和目标逐字段一致；稳定保持判据仍为
+`stable_hold_steps=5`，goal hold reward 仍为 `0`。
+
+新增 hold 汇总字段已写入 navigation analysis：`mean_maximum_consecutive_goal_hold_steps`、
+`maximum_consecutive_goal_hold_steps_max`、以及 `>=1`、`>=3`、`>=5` 的 episode 数量和 rate。本次 smoke 中
+train 的 mean/max 均为 `0`，三个阈值均为 `0/30`（对应 rate 均为 `0`）；这些仅是诊断输出，不影响 reward 或
+termination。
+
+修正后的 smoke 输出位于：
+
+```text
+data/synthetic/single_uav_terminal_curriculum30_coef025_budgeted_smoke_seed2026/
+logs/preliminary/single_uav_terminal_curriculum30_coef025_budgeted_smoke_seed2026/
+plots/preliminary/single_uav_terminal_curriculum30_coef025_budgeted_smoke_seed2026/
+```
+
+针对性 pytest 为 `17 passed`，`validate-preliminary` 返回 `ok: true`，schema、CSV、summary 和诊断图均正常。
+全量 pytest 为 `358 passed, 5 skipped, 2 failed`；两项失败来自未改动的
+`safety_risk_screening.py` 使用当前 Matplotlib 不支持的 `tick_labels` 参数，与本轮课程调度无关。
+本轮仍未运行正式 `100/20/20` 实验，也不据此 smoke 结果下研究结论。
+
+#### 单 UAV 终端课程正式 `100/20/20` 实验（2026-09-11）
+
+在预算内调度 smoke 通过后，使用完全相同的课程、奖励、动作空间、动力学和 PPO/MAPPO 参数运行正式单 UAV
+实验。唯一课程配置为：每 10 个训练回合中 6 个 normal far-distance、1 个 standard braking、3 个 terminal；
+terminal 阶段为 `1.5–3 m`、`3–5 m`、`5–8 m`。terminal curriculum 仅作用于 train，validation/test 继续使用
+原始完整远距离起点。
+
+本轮固定 `seed=scenario_seed=2026`、`steps=100`、`warmup/train/validation/test=10/100/20/20`、
+`coef=0.25`、`stable_hold_steps=5`、goal hold reward 为 `0`、安全投影关闭。正式运行共生成 140 个 episode，
+训练课程实际统计为：normal far-distance `60/100`、standard braking `10/100`、terminal `30/100`；terminal
+阶段 `0/1/2` 分别为 `11/30`、`10/30`、`9/30`，terminal 初始速度范围为 `2.0–5.5 m/s`。
+
+正式产物位于：
+
+```text
+data/synthetic/single_uav_terminal_curriculum30_coef025_seed2026/
+logs/preliminary/single_uav_terminal_curriculum30_coef025_seed2026/
+plots/preliminary/single_uav_terminal_curriculum30_coef025_seed2026/
+```
+
+`validate-preliminary` 返回 `ok: true`；schema、CSV、summary、checkpoint 和图表均完整。validation/test 的 20
+个 episode 起始位置、初始速度和目标与 `single_uav_braking_progress025_seed2026` 基线逐字段一致，且均无课程元数据。
+
+测试集与原 `coef=0.25` 基线对比如下：
+
+```text
+指标                         coef=0.25 baseline       terminal curriculum
+进入 8 m                     20/20 (100%)              2/20 (10%)
+进入 1 m                      1/20 (5%)                0/20 (0%)
+稳定到达                      0/20 (0%)                0/20 (0%)
+最小目标距离                  0.468 m                   6.664 m
+进入近目标时速度              2.536 m/s                 3.082 m/s
+近目标区域平均速度            1.896 m/s                 3.271 m/s
+近目标平均超速                0.308 m/s                 0.000 m/s
+```
+
+终端课程训练集出现了局部保持信号：`stable_goal=6/100`，`mean_maximum_consecutive_goal_hold_steps=0.5`，
+`maximum_consecutive_goal_hold_steps_max=5`，达到 `>=1/>=3/>=5` 步的回合数分别为 `13/10/6`（`13%/10%/6%`）。
+但 validation/test 的上述保持指标全部为 `0`。因此这些训练集样本没有转化为未见远距离起点上的终端成功。
+
+本轮结论是：terminal curriculum 没有达到“保持远距离导航并改善终端到达”的预期，且首先破坏了粗粒度远距离导航能力；
+当前验证集和测试集的主要瓶颈仍是 `8 m` 之前的远距离导航迁移，而不是可以直接进入下一项 goal hold reward 实验的纯
+`1 m` 内停车保持问题。暂不叠加 `goal_hold_reward=0.5`，以免把远距离导航退化和保持奖励的作用混在一起。
+
+#### 冻结 terminal curriculum 模型的起点距离分档只读诊断（2026-09-11）
+
+为定位当前 terminal curriculum 模型从哪个起点距离开始失效，新增了冻结 checkpoint 的只读评估入口
+`evaluate-single-uav-terminal-starts`。该入口只加载 `final.pt` 的策略参数和训练阶段冻结的归一化参数，不调用
+`MAPPOTrainer.update()`，不加入 rollout transition，不读取或写回 optimizer state，也不改变 reward、curriculum、
+动力学、动作空间或 PPO/MAPPO 参数。
+
+本轮使用正式 terminal curriculum 模型，在固定场景几何下生成四个独立 test-only 分组，每组 20 个 episode：
+`1.5–3 m`、`3–5 m`、`5–8 m` 和原始 normal far-distance。前三档使用等间距起点距离，并沿目标方向设置与正式
+terminal 起点一致的非零初速度；normal far-distance 使用原始完整远距离起点。四档均未生成 train/validation，
+所有 episode 均为只读推理诊断。
+
+分档结果如下：
+
+```text
+起点分组             进入 8 m       进入 1 m       stable       最小目标距离   平均速度     平均最大保持步数   >=1 / >=3 / >=5
+1.5–3 m              20/20 (100%)  20/20 (100%)  6/20 (30%)  0.059 m       1.428 m/s    2.45              13 / 10 / 6
+3–5 m                20/20 (100%)  20/20 (100%)  1/20 (5%)   0.123 m       1.450 m/s    0.95              6 / 4 / 1
+5–8 m                20/20 (100%)  20/20 (100%)  0/20 (0%)   0.156 m       1.761 m/s    0.00              0 / 0 / 0
+normal far-distance   2/20 (10%)    0/20 (0%)    0/20 (0%)   6.664 m       1.913 m/s    0.00              0 / 0 / 0
+```
+
+该诊断显示：从 `1.5–3 m` 和 `3–5 m` 起点出发，策略已经能高概率进入 `1 m`，并能在部分回合形成连续保持；
+从 `5–8 m` 起点出发虽然都能进入 `1 m`，但没有任何回合达到 1 个稳定保持步，说明较长终端距离上的制动/保持链条
+仍未形成。原始 normal far-distance 组只有 `2/20` 进入 `8 m`，因此正式模型当前最先失效的环节是远距离导航向
+终端课程的迁移；不能把近距离分档的改善直接解释为完整任务成功。
+
+诊断产物位于：
+
+```text
+data/synthetic/single_uav_terminal_curriculum30_coef025_start_distance_diagnostic_seed2026/
+logs/preliminary/single_uav_terminal_curriculum30_coef025_start_distance_diagnostic_seed2026/
+plots/preliminary/single_uav_terminal_curriculum30_coef025_start_distance_diagnostic_seed2026/
+```
+
+其中 `group_summary.csv` 提供四档汇总，`episode_metrics.csv` 提供每回合指标，
+`start_distance_diagnostic.png` 提供分档图。schema 校验为 `ok=true`；checkpoint SHA-256 和策略参数在评估前后
+均未变化。新增评估相关测试通过；全量 pytest 为 `361 passed, 5 skipped, 2 failed`，两项失败仍是未改动的
+`safety_risk_screening.py` 使用当前 Matplotlib 不支持的 `tick_labels` 参数所致。
+
+#### navigation-preserving terminal fine-tuning（2026-09-11）
+
+根据起点距离诊断，本轮没有继续使用已经退化的 terminal curriculum checkpoint，而是先加载原始
+`single_uav_braking_progress025_seed2026` 正式 checkpoint 做只读复现。baseline checkpoint 的 SHA-256 为：
+
+```text
+77d8702e500fe7d1750bcbba96b9aea238e9a982c0af88dd440881e1b7a9330c
+```
+
+只读复现得到正常远距离 test：进入 `8 m = 20/20`、进入 `1 m = 1/20`、stable `= 0/20`、最小目标距离
+`0.468 m`、近目标平均超速 `0.308 m/s`，与原 baseline 一致；只读阶段 checkpoint 文件哈希和策略哈希均未变化。
+
+随后从该 baseline 权重和 optimizer state 继续进行独立 fine-tuning。除课程调度外没有修改 reward、动作空间、动力学、
+PPO/MAPPO 参数、安全投影、`stable_hold_steps` 或 goal hold reward；`goal_hold_reward` 保持 `0`，
+`stable_hold_steps` 保持 `5`，且没有新增奖励项。课程调度明确为：
+
+```text
+90% normal full-distance train episodes
+10% terminal train episodes
+terminal distance: 5–8 m
+standard braking curriculum: 0%
+validation/test: 100% normal full-distance, no curriculum
+```
+
+smoke（10 train + 2 validation + 2 test）实际为 `9 normal + 1 terminal`，参数从 baseline policy hash 开始，
+optimizer state 的 27 个条目成功恢复，参数发生更新，`validate-preliminary` 为 `ok=true`。正式轮（100 train + 20
+validation + 20 test）实际为 `90 normal + 10 terminal`；10 个 terminal 起点覆盖 `5.0–8.0 m`，初速度均非零，
+范围约为 `3.87–5.50 m/s`。validation/test 的实际起点均保持约 `19.729 m` 的正常远距离分布，curriculum 标记为
+关闭；正式输出 `validate-preliminary` 为 `ok=true`。
+
+正式 fine-tuning 与 baseline 的正常远距离 test 对比如下：
+
+```text
+指标                         coef=0.25 baseline       navigation-preserving fine-tuning
+进入 8 m                     20/20 (100%)              20/20 (100%)
+进入 1 m                     1/20 (5%)                0/20 (0%)
+stable goal                 0/20 (0%)                0/20 (0%)
+最小目标距离                 0.468 m                   3.033 m
+进入近目标时速度             2.536 m/s                 5.114 m/s
+近目标区域平均速度           1.896 m/s                 2.416 m/s
+近目标平均超速               0.308 m/s                 0.563 m/s
+平均最大连续保持步数         0.00                      0.00
+最大连续保持步数             0                         0
+保持步数 >=1 / >=3 / >=5     0 / 0 / 0                 0 / 0 / 0
+```
+
+因此本轮满足“保护远距离导航”的首要条件（进入 `8 m = 20/20`），但没有改善 `8 m → 1 m` 的精确接近，且
+进入 `1 m` 从 baseline 的 `1/20` 下降为 `0/20`；停车保持的所有 hold-step 指标仍为零。本轮
+`navigation-preserving terminal fine-tuning` 不支持直接进入 goal hold reward 实验，后续应先分析为什么从 baseline
+继续更新后仍未把 5–8 m terminal 样本迁移到正常远距离 test。
+
+本轮新增执行入口和产物：
+
+```text
+src/experiments/single_uav_navigation_preserving_finetune.py
+data/synthetic/single_uav_braking_progress025_baseline_verify_seed2026/
+data/synthetic/single_uav_navigation_preserving_finetune_smoke_seed2026/
+data/synthetic/single_uav_navigation_preserving_finetune_seed2026/
+logs/preliminary/single_uav_navigation_preserving_finetune_seed2026/
+plots/preliminary/single_uav_navigation_preserving_finetune_seed2026/
+```
+
+针对性 fine-tuning/冻结评估测试通过；全量 pytest 为 `365 passed, 5 skipped, 2 failed`。两项失败与本轮无关，仍为
+未改动的 `safety_risk_screening.py` 在当前 Matplotlib 环境中使用不支持的 `tick_labels` 参数。
+
+#### baseline 与 navigation-preserving fine-tuned 的终端接近分段诊断（2026-09-11）
+
+为定位 fine-tuned policy 在正常远距离任务中从 `8 m` 到 `1 m` 的失效位置，新增了只读配对诊断入口：
+每个 checkpoint 使用相同的 `20` 个 normal far-distance test 场景、相同 test seed index 和相同场景对象，
+不调用 `MAPPOTrainer.update`，不写回 checkpoint。距离分段采用明确的半开区间：
+`8–5 m=[5,8)`、`5–3 m=[3,5)`、`3–1 m=[1,3)`，`[0,1)` 为目标区。
+
+关键分段结果如下（推进速度为日志 `goal_progress_delta / dt`，制动比例以 action log 的二值制动事件计算）：
+
+```text
+指标                         coef=0.25 baseline       navigation-preserving fine-tuned
+进入 8–5 m                   20/20                    20/20
+继续进入 5–3 m               17/20                    20/20
+继续进入 3–1 m               11/20                    0/20
+继续进入目标区(<1 m)         1/11                     0/0
+5–3 m 平均推进速度           0.0542 m/s               0.1745 m/s
+5–3 m 平均速度               1.814 m/s                2.712 m/s
+5–3 m 平均目标速度           2.057 m/s                2.193 m/s
+5–3 m 制动/有效制动比例      0.730/0.718              0.755/0.752
+3–1 m 平均推进速度           0.1125 m/s               无样本
+3–1 m 平均速度               1.821 m/s                无样本
+```
+
+更细的 `3–3.5 m` 检查显示 fine-tuned policy 只有 `6/20` 个 episode 进入该窄区间，区间内平均速度约
+`2.582 m/s`，而距离相关目标速度约 `1.148 m/s`；估计距离仍有局部下降，但没有一个 episode 跨过
+`3 m` 进入 `3–1 m`。这与正式 fine-tuning test 的最小距离 `3.033 m` 一致，说明当前行为在约 `3 m`
+附近形成了“接近—制动—回退/停滞”的局部策略切换点，而不是远距离 `8 m` 入口再次失效。
+
+因此下一轮优先级应为 **C：针对约 3 m 附近的速度—推进奖励权衡做最小单因素诊断/修正**；暂时不先扩大
+terminal 起点分布（A），也不从已退化的 fine-tuned policy 继续加大训练（B）。本轮没有修改 reward、
+curriculum、动力学、动作空间或 PPO/MAPPO 参数，也没有加入 goal hold reward。
+
+本轮产物：
+
+```text
+src/experiments/single_uav_terminal_approach_diagnostic.py
+tests/test_single_uav_terminal_approach_diagnostic.py
+data/synthetic/single_uav_terminal_approach_diagnostic_seed2026/
+logs/preliminary/single_uav_terminal_approach_diagnostic_seed2026/
+plots/preliminary/single_uav_terminal_approach_diagnostic_seed2026/
+```
+
+两份 checkpoint 的文件 SHA-256 和加载后策略参数哈希在评估前后均未变化；两边 schema 校验均为
+`ok=true`，完整回归测试为 `373 passed, 5 skipped, 1 warning`。
+
+#### 单 UAV scripted/oracle 终端停车可行性上限测试（2026-09-11）
+
+为区分“当前任务在动力学上能否完成”和“RL 策略是否学会完成”，新增独立的只读
+`diagnose-single-uav-scripted-feasibility` 入口。它不训练 neural policy、不调用 PPO 更新、不写回
+checkpoint，也不改变 reward、curriculum、动作空间、动力学、稳定判据或正常 test 场景。scripted/oracle
+直接读取仿真真值位置、速度和 goal，仅通过现有 `environment.step(delta_v)` 提交合法的三维速度增量，
+因此只能作为物理可行性上限，不是 RL 性能结果。
+
+当前任务定义记录为：正常起点到 goal 约 `19.7286 m`，`100` steps，`dt=0.2 s`，最大速度
+`12 m/s`，最大加速度 `3 m/s²`，每步最大 `delta-v=0.6 m/s`，goal radius `1 m`，stable speed
+threshold `0.5 m/s`，连续稳定 `5` steps。稳定条件仍为 `loc_goal_v2` 的 estimated goal distance
+不超过 `1 m` 且实际速度不超过 `0.5 m/s`，连续满足 5 次；碰撞和稳定到达仍会提前结束，否则在
+100 steps 截止。环境原有 safety projection 保持开启，braking safety projection 保持关闭。
+
+scripted controller 使用四段式规则：远距离以 `6 m/s` 朝 goal 巡航；`8--3 m` 按带 1 m 控制裕量的
+停止距离曲线降速；`3--1 m` 保持正径向低速推进；进入 `1 m` 后将目标速度压到 `0.35 m/s` 以下并
+进行小幅误差修正。所有动作仍经过当前动力学和 action interface，没有位置/速度 teleport。
+
+20 个相同 normal far-distance test 场景的只读结果为：
+
+```text
+指标                         coef=0.25 baseline RL   navigation-preserving fine-tuned RL   scripted/oracle
+进入 8 m                     20/20                   20/20                                 20/20
+进入 5 m                     17/20                   20/20                                 20/20
+进入 3 m                     11/20                   0/20                                  20/20
+进入 1 m                     1/20                    0/20                                  20/20
+stable goal                 0/20                    0/20                                  20/20
+最小目标距离                 0.468 m                 3.033 m                               0.295 m
+平均最小目标距离             3.135 m                 3.584 m                               0.610 m
+进入 1 m 时平均速度          1.239 m/s               NA                                    0.473 m/s
+目标区内平均速度             1.459 m/s               NA                                    0.360 m/s
+平均最大连续保持步数         0.00                    0.00                                  5.00
+保持步数 >=1 / >=3 / >=5     0 / 0 / 0               0 / 0 / 0                             20 / 20 / 20
+平均进入 8/5/3/1 m 步数      36.6/44.9/50.7/63.0     20.6/24.4/NA/NA                        15.0/18.0/21.0/28.2
+```
+
+oracle 20 个回合均在 `32--38` steps 内达到稳定成功，平均约 `32.75` steps；环境动作 clipping 为
+`0`。控制器自身约 `45.9%` 的步使用了达到合法上限的 delta-v，最大请求制动约 `1.187 m/s`，
+实际应用上限为 `0.600 m/s`，但该制动力仍足以完成任务。因此在当前 `100`-step horizon、动作空间和
+动力学下，单 UAV 的“远距离导航 → 进入 1 m → 低速连续保持 5 steps”在物理上可完成；主要差距在
+RL 的策略学习、信用分配和技能组合，而不是当前任务不可行或时间上限不足。fine-tuned policy 的
+`3 m` 附近失效也由同一配对评估复现：它保住了进入 `8 m`，但没有越过 `3 m`。
+
+正式产物：
+
+```text
+src/experiments/single_uav_scripted_feasibility.py
+tests/test_single_uav_scripted_feasibility.py
+data/synthetic/single_uav_scripted_feasibility_seed2026/
+logs/preliminary/single_uav_scripted_feasibility_seed2026/
+plots/preliminary/single_uav_scripted_feasibility_seed2026/
+```
+
+scripted/oracle、baseline RL 和 fine-tuned RL 三个角色的 schema 均为 `ok=true`；两个 RL checkpoint
+在评估前后的 SHA-256 和策略参数哈希均未变化。使用项目本地 pytest 临时目录的全量回归为
+`379 passed, 5 skipped, 1 warning`。
+
+#### 单 UAV 约 3 m 速度控制单因素实验（2026-09-11）
+
+本轮只新增 `single_uav_braking_distance_speed_profile=early_smooth`，使 braking-distance 模式在
+更远处平滑降低目标速度；未修改 reward、terminal curriculum、动作空间、动力学、PPO/MAPPO 参数、
+stable hold 判据或 validation/test 分布。当前节点值如下：
+
+```text
+距离              1 m     3 m     5 m     6 m     8 m
+legacy            0.50    0.50    2.872   3.50    4.50 m/s
+early_smooth      0.50    1.38    2.425   3.415   6.00 m/s
+```
+
+正式 `100/20/20` fine-tuning 从原始 coef=`0.25` baseline checkpoint 起步，训练结构保持
+`90% normal + 10% terminal(5--8 m)`。正式 test 对比如下：
+
+```text
+指标                         baseline       old fine-tuned       early_smooth fine-tuned
+进入 8 m                     20/20          20/20                20/20
+进入 5 m                     17/20          20/20                20/20
+进入 3 m                     11/20          0/20                 20/20
+进入 1 m                     1/20           0/20                 2/20
+stable goal                 0/20           0/20                 0/20
+最小目标距离                 0.468 m        3.033 m              0.821 m
+近目标区平均速度             1.896 m/s      2.416 m/s            2.181 m/s
+近目标区平均目标速度         2.742 m/s      3.271 m/s            2.767 m/s
+近目标区平均超速             0.308 m/s      0.563 m/s            0.667 m/s
+平均最大连续保持步数         0.00           0.00                 0.00
+保持步数 >=1 / >=3 / >=5     0/0/0          0/0/0                0/0/0
+```
+
+新方案保住了远距离 `8 m` 的 `20/20`，并把旧 fine-tuned 的 `5--3 m -> 3--1 m` 从 `0/20` 改善为
+`20/20` 进入 `3--1 m`，最终进入 `1 m` 为 `2/20`。但是 stable goal 仍为 `0/20`，目标区内速度
+仍明显高于目标速度。因此本轮解决了约 `3 m` 的穿越瓶颈，但没有解决最后 `1 m` 的低速停车保持；
+不应据此启用 goal hold reward。
+
+两份冻结诊断均使用完全相同的 `20` 个 normal far-distance 场景，三策略统一比较的场景哈希一致；
+checkpoint 和 policy 参数在评估前后均未变化。early_smooth 的 `8--5 m / 5--3 m / 3--1 m`
+继续进入下一段分别为 `20/20 / 20/20 / 2/20`，说明剩余主要瓶颈已转移到 `1 m` 内的减速和连续保持，
+但尚未达到稳定成功。
+
+本轮产物包括：
+
+```text
+src/simulation/motion_model.py
+src/simulation/environment.py
+src/experiments/formal.py
+src/experiments/pilot.py
+src/experiments/single_uav_navigation_analysis.py
+src/experiments/single_uav_navigation_preserving_finetune.py
+src/experiments/single_uav_terminal_approach_diagnostic.py
+tests/test_motion_model.py
+tests/test_single_uav_terminal_approach_diagnostic.py
+data/synthetic/single_uav_speed_curve_early_smooth_finetune_seed2026/
+logs/preliminary/single_uav_speed_curve_early_smooth_finetune_seed2026/
+plots/preliminary/single_uav_speed_curve_early_smooth_finetune_seed2026/
+logs/preliminary/single_uav_speed_curve_three_policy_comparison_seed2026/
+plots/preliminary/single_uav_speed_curve_three_policy_comparison_seed2026/
+```
+
+三组正式实验的 `validate-preliminary` 均为 `ok=true`、schema 为 `episode-v1.3`；本轮完整回归为
+`379 passed, 5 skipped, 1 warning`。两份冻结诊断的 schema、场景配对和只读检查也全部通过。
+
+#### 单 UAV RL-equivalent observation Oracle 与 Actor action-output 审计（2026-09-11）
+
+本轮暂停所有 reward、curriculum、target-speed 和 PPO 调整，新增只读诊断入口
+`diagnose-single-uav-rl-equivalent-oracle-audit`。评估使用同一组 `20` 个正常远距离场景，
+并行比较 truth scripted/oracle、仅使用 Actor 可见 EKF/node features 的 estimated-state oracle、
+原始 coef=`0.25` baseline RL 和 navigation-preserving fine-tuned RL。四类角色均未训练、未更新
+checkpoint、未加入 rollout transition，也未改变任务定义。
+
+正式结果如下：
+
+```text
+指标                         truth oracle   estimated-state oracle   baseline RL   fine-tuned RL
+进入 8 m                     20/20          20/20                    20/20         20/20
+进入 5 m                     20/20          20/20                    17/20         20/20
+进入 3 m                     20/20          20/20                    11/20         0/20
+进入 1 m                     20/20          20/20                    1/20          0/20
+stable goal                 20/20          20/20                    0/20          0/20
+平均最小目标距离             0.610 m        0.575 m                  3.135 m       3.584 m
+1 m 入口平均速度             0.473 m/s      0.595 m/s                1.239 m/s     --
+1 m 内平均速度               0.360 m/s      0.386 m/s                1.459 m/s     --
+平均最大连续保持步数         5.00           5.00                     0.00          0.00
+保持步数 >=1 / >=3 / >=5     20/20/20       20/20/20                 0/0/0         0/0/0
+超时回合                     0/20           0/20                    20/20         20/20
+```
+
+estimated-state oracle 只从 `node_features` 的自机节点读取 `[0:3]` 估计位置、`[3:6]` 估计速度和
+`[30:33]` 估计目标差向量，未使用 simulator truth fallback；其相对 truth 的平均绝对误差为：
+目标距离 `0.092 m`、目标方向角 `4.71°`、径向速度 `0.0738 m/s`。因此 RL 实际观测信息本身
+足以支持当前任务，主要瓶颈不是 localization/observation insufficiency。
+
+Actor action chain 的审计显示：baseline 的平均 scaled/applied action norm 为 `0.0937 m/s`、
+最大 braking projection 为 `0.1164 m/s`；fine-tuned 分别为 `0.1573 m/s` 和 `0.2910 m/s`，
+均显著低于合法动作约 `0.6 m/s` 的可用制动幅度。两者的 scale-to-applied residual 均约为
+`1e-8 m/s`，action clipping 为 `0`，故没有发现 action scaling/mapping 缩小问题。按全局审计规则，
+主要根因分类为 `C`（Actor 未充分使用可用动作/制动幅度）；距离分段还显示 baseline 在 `8--5 m`
+和 `5--3 m` 的径向速度均值分别约 `-0.051` 和 `-0.095 m/s`，fine-tuned 在 `5--3 m`
+约 `-0.334 m/s`，说明局部还存在径向推进与过早制动的策略耦合，但不改变本轮“只诊断、不修改”的结论。
+
+配置审计确认 baseline 与 fine-tuned 的 test effective environment contract 相同；与先前 feasibility
+实验的 `environment_safety_projection_enabled=true`、`braking_safety_projection_enabled=false` 一致。
+两份 checkpoint SHA-256 未变：baseline 为
+`77d8702e500fe7d1750bcbba96b9aea238e9a982c0af88dd440881e1b7a9330c`，fine-tuned 为
+`083e07253f6d2f775509c46bc1959afae0f5e3bacf455fa476ad8df08e8cd795`。
+
+正式产物包括：
+
+```text
+src/experiments/single_uav_rl_equivalent_oracle_audit.py
+tests/test_single_uav_rl_equivalent_oracle_audit.py
+data/synthetic/single_uav_rl_equivalent_oracle_audit_seed2026/
+logs/preliminary/single_uav_rl_equivalent_oracle_audit_seed2026/
+plots/preliminary/single_uav_rl_equivalent_oracle_audit_seed2026/
+```
+
+四个角色的 `validate_episode_benchmark` 均为 `ok=true`，`overall_schema_ok=true`，并生成 8 张诊断图。
+新增诊断测试为 `5 passed`。本次全量 pytest 为 `382 passed, 5 skipped, 2 failed`；两个失败来自已有
+`src/experiments/safety_risk_screening.py` 使用 `tick_labels` 与当前 Matplotlib 版本不兼容，未涉及本轮
+诊断代码或研究机制，未在本轮扩大修改范围。
+
+#### C 路线第二半部分：3--1 m 低速径向推进奖励（2026-09-11）
+
+基于 early-smooth speed-control 正式实验，本轮只增加一个单因素奖励：
+`single_uav_terminal_radial_progress_reward_coef=0.5`。该奖励仅在估计目标距离满足
+`1 m < d <= 3 m` 时生效，使用非负径向进度和速度门控：
+
+```text
+radial_progress_m = max(0, d_pre - d_post)
+speed_gate = 1 / (1 + (max(0, speed - target_speed) / 1.0)^2)
+progress_signal = clip(radial_progress_m / 0.5, 0, 1) * speed_gate
+terminal_reward = 0.5 * progress_signal
+```
+
+该项没有新增负惩罚，也没有改变 goal hold reward、stable hold steps、termination、动作空间、动力学、
+PPO/MAPPO 参数或 terminal curriculum。逐步日志新增 active、径向进度、speed gate、signal 和 reward
+字段；clip saturation 只作诊断，不参与 reward 或 termination。
+
+正式 fine-tuning 仍从原始 coef=`0.25` baseline checkpoint 开始，保持 `90% normal full-distance +
+10% terminal(5--8 m)`，完成 `100 train / 20 validation / 20 test`。训练审计为 `90/10/0`，validation
+和 test 均为 normal far-distance，terminal 只出现在 train；smoke 和正式结果的
+`validate-preliminary` 均为 `ok=true`。正式 D checkpoint 的源 checkpoint SHA-256 为
+`77d8702e500fe7d1750bcbba96b9aea238e9a982c0af88dd440881e1b7a9330c`，输出 checkpoint SHA-256 为
+`edeb876312e053c3fef4e6393e72aa56b275004f6b63f1f2153ef153f232f5e4`。
+
+四策略在同一组 `20` 个 normal far-distance test 场景下的统一结果为：
+
+```text
+指标                         A baseline   B old fine   C early-smooth   D + radial reward
+进入 8 m                     20/20        20/20        20/20             20/20
+进入 5 m                     17/20        20/20        20/20             20/20
+进入 3 m                     11/20        0/20         20/20             17/20
+进入 1 m                     1/20         0/20         2/20              0/20
+stable goal                 0/20         0/20         0/20              0/20
+最小目标距离                 0.468 m      3.033 m      0.821 m            1.885 m
+近目标区平均速度             1.896 m/s    2.416 m/s    2.181 m/s          2.545 m/s
+近目标区平均目标速度         2.742 m/s    3.271 m/s    2.767 m/s          3.132 m/s
+近目标区平均超速             0.308 m/s    0.563 m/s    0.667 m/s          0.639 m/s
+平均最大连续保持步数         0.00         0.00         0.00               0.00
+保持步数 >=1 / >=3 / >=5     0/0/0        0/0/0        0/0/0             0/0/0
+```
+
+D 仍保住了 `8 m=20/20` 和 `5 m=20/20`，但没有超过 C 的 `3 m=20/20`；D 的 `5--3 m -> 3--1 m`
+继续比例为 `17/20`，且 `1 m=0/20`。因此 `coef=0.5` 的低速径向推进奖励没有改善最终进入目标区，当前瓶颈仍是
+`3 m -> 1 m` 的可持续低速推进，尚未转移为 `1 m` 内停车保持问题。D 的新奖励在 `8--5 m`、`5--3 m`
+均为 0，只有 `3--1 m` 激活；正式 train/validation/test 的平均 active fraction 分别为 `0.0376/0.0385/0.0430`，
+平均 reward 分别为 `0.001044/0.001228/0.001296`，训练 clip saturation 为 `0.0016`，validation/test 为 `0`。
+
+本轮新增或更新的主要产物：
+
+```text
+src/experiments/single_uav_four_policy_comparison.py
+src/experiments/single_uav_navigation_preserving_finetune.py
+src/experiments/single_uav_terminal_approach_diagnostic.py
+tests/test_single_uav_terminal_approach_diagnostic.py
+data/synthetic/single_uav_terminal_radial_progress05_early_smooth_seed2026/
+data/synthetic/single_uav_terminal_radial_progress05_early_smooth_smoke_seed2026/
+data/synthetic/single_uav_terminal_radial_progress05_early_smooth_terminal_approach_diagnostic_seed2026/
+logs/preliminary/single_uav_terminal_radial_progress05_early_smooth_seed2026/
+logs/preliminary/single_uav_terminal_radial_progress05_early_smooth_terminal_approach_diagnostic_seed2026/
+logs/preliminary/single_uav_terminal_radial_progress05_early_smooth_four_policy_comparison_seed2026/
+plots/preliminary/single_uav_terminal_radial_progress05_early_smooth_four_policy_comparison_seed2026/
+```
+
+smoke 定向审计测试为 `21 passed`，全量回归为 `386 passed, 5 skipped, 1 warning`。本轮没有加入
+goal hold reward，也没有自动开始下一轮机制修改。
+
+#### Actor-action-constrained estimated-state Oracle 可行性诊断（2026-09-11）
+
+在不训练、不更新 checkpoint、不改变 reward、curriculum、动力学、动作映射或成功判据的前提下，
+基于上一轮 `single_uav_rl_equivalent_oracle_audit_seed2026` 的 20 个正常远距离配对场景，
+新增并运行了第五种只读角色：`actor_constrained_estimated_state_oracle`。其状态输入仍只来自
+RL 可见的 estimated node features；期望动作经过当前 MAPPO Actor 的真实变换
+`Normal -> tanh -> max_delta_v/sqrt(3) per-axis` 后才送入 `environment.step`。
+
+当前动作集合为：
+
+```text
+Actor:       |delta_v_i| <= 0.346410 m/s, i=1,2,3; theoretical norm max = 0.600000 m/s
+Environment: ||delta_v||_2 <= 0.600000 m/s
+```
+
+两者不是同一个集合；Actor 的 box 是 environment norm-ball 的子集。对单位目标方向 `u`，
+Actor 沿该方向的最大径向动作为
+`min(max_delta_v, (max_delta_v/sqrt(3))/max(abs(u_i)))`。
+
+五类策略统一结果如下：
+
+```text
+策略                                      8m       5m       3m       1m       stable    mean min(m)
+truth oracle                              20/20    20/20    20/20    20/20    20/20       0.610
+estimated-state oracle                   20/20    20/20    20/20    20/20    20/20       0.575
+Actor-constrained estimated oracle       20/20    20/20    20/20    20/20    20/20       0.610
+coef=0.25 baseline RL                    20/20    17/20    11/20     1/20     0/20       3.135
+navigation-preserving fine-tuned RL      20/20    20/20     0/20     0/20     0/20       3.584
+```
+
+Actor 约束在 `79.10%` 的 constrained-oracle step 中改变了期望动作；但约束后的 Oracle 仍然
+20/20 进入 1 m、20/20 稳定保持 5 steps。正常远距离场景的平均径向可达动作约为 `0.454 m/s`
+（范围 `0.375--0.556 m/s`）。这说明当前 per-axis Actor 参数化虽比环境动作空间更窄，仍足以完成任务；
+主要差距在 RL 策略对已有动作能力的使用方式，而不是 observation 不足、定位不可行、动力学不可行、
+episode horizon 不足或 Actor 动作集合本身不可行。
+
+距离段动作幅度与成功 constrained Oracle 的 mean action norm 比值已写入：
+
+```text
+logs/preliminary/single_uav_actor_constrained_oracle_seed2026/action_amplitude_distance_summary.csv
+```
+
+正式只读诊断产物：
+
+```text
+data/synthetic/single_uav_actor_constrained_oracle_seed2026/
+logs/preliminary/single_uav_actor_constrained_oracle_seed2026/
+plots/preliminary/single_uav_actor_constrained_oracle_seed2026/
+```
+
+第五角色及四个缓存角色的 schema 校验均通过，`summary.json` 中 `overall_schema_ok=true`，
+checkpoint 和 cached policy state 未改变；新增定向测试为 `11 passed`。本轮停止在可行性诊断，
+没有自动执行 Behavior Cloning、重新训练或 Actor 结构修改。
+
+#### Oracle Demonstration → Behavior Cloning → BC-only Evaluation（2026-09-12）
+
+基于 Actor-constrained estimated-state Oracle 已在相同 observation/action 约束下完成任务的结论，
+本轮没有继续修改 reward、target-speed、terminal curriculum、稳定判据、动力学、动作映射、episode horizon
+或 PPO 参数。新增了独立的 Oracle demonstration 生成、Actor-only Behavior Cloning 和只读 BC evaluation
+入口。teacher 只读取 RL Actor 可见的 estimated `node_features`，其期望动作经过当前 Actor 的真实
+`Normal → tanh → scaled physical delta-v` 约束后写入 demonstration；未使用 simulator truth 控制信息。
+
+正式 demonstration 使用独立的 train/validation 场景和 noise seed：`48` 个 train episodes、`20` 个
+validation episodes，共 `68` 条 canonical episode；train/validation 的 scenario seed 与 noise seed 均不重叠，
+curriculum 在 train/validation/test 均关闭。每步保存 observation、physical delta-v target、goal distance、
+speed、径向/切向速度、goal direction、braking component 及 action projection 诊断。
+
+BC 从原始 coef=`0.25` baseline checkpoint 初始化，只训练 Actor mean 相关参数；critic、normalizer、log_std
+冻结，不进行 PPO 更新。损失为最终 post-tanh scaled physical delta-v 的 MSE，不拟合 pre-tanh target，
+也没有加入额外 radial/tangential loss。训练 `2406` 个样本、验证 `973` 个样本、`12` epochs 后：
+
+```text
+loss                           first       final
+train physical-action MSE      0.0361173    0.0185977
+validation physical-action MSE 0.0373503    0.0219903
+```
+
+在相同的 `20` 个正常远距离 test episodes 上的统一结果为：
+
+```text
+指标                         baseline RL   navigation fine-tuned   BC Actor   Actor-constrained Oracle
+进入 8 m                     20/20         20/20                   20/20      20/20
+进入 5 m                     17/20         20/20                   20/20      20/20
+进入 3 m                     11/20         0/20                    17/20      20/20
+进入 1 m                     1/20          0/20                    2/20       20/20
+stable goal                 0/20          0/20                    0/20       20/20
+平均每回合最小距离           3.135 m       3.584 m                 1.819 m    0.610 m
+1 m 内平均速度               1.459 m/s     --                      1.234 m/s  0.709 m/s
+平均最大连续保持步数         0.00          0.00                    0.00       5.00
+保持步数 >=1 / >=3 / >=5     0/0/0         0/0/0                   0/0/0      20/20/20
+```
+
+BC 同时保住了远距离进入 `8 m=20/20`，并把进入 `3 m` 从 baseline 的 `11/20` 提升到 `17/20`；
+但进入 `1 m` 仅为 `2/20`，stable 仍为 `0/20`。因此 BC 已证明原始 PPO 的探索/信用分配确实是重要瓶颈，
+但当前 BC-only Actor 仍未学会 Oracle 的终端低速保持行为。下一阶段可以设计低学习率
+`PPO + BC imitation anchor`，但本轮在 BC-only evaluation 后停止，没有自动执行 PPO。
+
+正式产物：
+
+```text
+src/experiments/single_uav_oracle_behavior_cloning.py
+tests/test_single_uav_oracle_behavior_cloning.py
+data/synthetic/single_uav_oracle_demonstrations_seed2026/
+data/synthetic/single_uav_bc_oracle_seed2026/
+data/synthetic/single_uav_bc_only_evaluation_seed2026/
+logs/preliminary/single_uav_oracle_demonstrations_seed2026/
+logs/preliminary/single_uav_bc_oracle_seed2026/
+logs/preliminary/single_uav_bc_only_evaluation_seed2026/
+plots/preliminary/single_uav_bc_oracle_seed2026/
+plots/preliminary/single_uav_bc_only_evaluation_seed2026/
+```
+
+相关定向测试为 `18 passed`；demonstration 根目录及四个 evaluation role 根目录的
+`validate-preliminary` 均为 `ok=true`，每个 evaluation role 均为 `40` 个 episode，schema 完整，
+checkpoint 文件保持未被评估过程改写。
+
+## 2026-09-12：E 路线向量修正实验
+
+在原始 `coef=0.25` checkpoint 上完成了 E：early-smooth + terminal target-velocity-vector correction
+（系数 `0.5`，仅作用于估计距离 `(1,3] m`，不启用 goal hold reward）。正式配置为
+`100 train / 20 validation / 20 test`，训练调度为 `90% normal + 10% terminal(主要 5--8 m)`，
+`validate-preliminary` 为 `ok=true`。
+
+E 的正常远距离 test 为：进入 `8 m=20/20`、进入 `5 m=20/20`、进入 `3 m=20/20`，
+进入 `1 m=0/20`、stable `0/20`，最小距离约 `1.062 m`。因此该实验保护了远距离和 3 m
+接近能力，但尚未解决 1 m 内的稳定停车问题；本阶段未继续加入 goal hold reward。
+
+统一只读比较产物位于：
+
+```text
+src/experiments/single_uav_acde_comparison.py
+logs/preliminary/single_uav_acde_comparison_seed2026/
+plots/preliminary/single_uav_acde_comparison_seed2026/
+```
+
+#### BC-v2 与 DAgger round-1（2026-09-12）
+
+在上一阶段 BC-only 结果基础上，本阶段没有修改 reward、braking progress coef、target-speed、terminal
+curriculum、goal hold reward、stable hold 判据、动作映射、动力学、episode horizon 或 PPO 参数。
+BC-v2 仍从 baseline Actor 初始化，只训练 Actor mean；critic、normalizer、log_std 冻结，使用
+post-tanh scaled physical delta-v MSE，不执行 PPO。正式 BC-v2 使用 60 epochs、patience=8，最佳验证
+epoch 为 60，validation MSE 从 `0.0373503` 降至 `0.0166720`。
+
+BC-v2 闭环 test 仍只有 stable `1/20`，但进入 `3 m` 提升到 `18/20`、进入 `1 m` 提升到 `8/20`，
+因此满足“离线拟合已改善但闭环仍有分布偏移”的 DAgger 条件。DAgger round-1 只在 train 场景中运行
+BC-v2 学生策略，再用 Actor-visible estimated-state Oracle 对学生访问状态重标注；没有读取 truth 控制，
+没有使用 test 场景，也没有更新策略直到进入单独的 Actor-only BC 训练阶段。
+
+正式 DAgger 数据覆盖 `24` 个独立 scenario seed 和 `24` 个 noise seed，收集 `2274` 条 correction，
+与原始 `2406` 条 expert train 样本合并为 `4680` 条训练样本，validation 仍为原始 disjoint expert
+validation 的 `973` 条样本。correction 距离分布为：`>8 m=919`、`8--5 m=521`、`5--3 m=519`、
+`3--1 m=269`、`<=1 m=46`。DAgger Actor 从 BC-v2 最佳 checkpoint 初始化，39 epochs 后 early stop，
+最佳验证 epoch 为 31，validation MSE 为 `0.0175382`；critic、normalizer、log_std 均冻结，未执行 PPO。
+
+相同正常远距离 test 场景下的统一结果：
+
+```text
+指标                         baseline RL   old BC    BC-v2     DAgger r1   Oracle
+进入 8 m                     20/20         20/20     20/20     20/20       20/20
+进入 5 m                     17/20         20/20     20/20     20/20       20/20
+进入 3 m                     11/20         17/20     18/20     20/20       20/20
+进入 1 m                     1/20          2/20      8/20      20/20       20/20
+stable goal                  0/20          0/20      1/20      20/20       20/20
+平均每回合最小距离           3.135 m       1.819 m   1.549 m   0.449 m     0.610 m
+1 m 内平均速度               1.459 m/s     1.234     0.958     0.541       0.709
+平均最大连续保持步数         0.00          0.00      0.25      5.00        5.00
+保持步数 >=1 / >=3 / >=5     0/0/0         0/0/0     1/1/1     20/20/20    20/20/20
+```
+
+DAgger round-1 同时保住了远距离导航（进入 `8 m=20/20`），并在正常远距离起点上达到进入 `1 m=20/20`
+与 stable `20/20`。这表明 BC-v2 的主要剩余问题确实是 student visited-state 分布偏移，而不是当前
+动力学或 Actor action 接口不可行；本阶段仍停止在 BC-only/DAgger evaluation，没有自动进入 PPO+BC anchor。
+
+正式产物：
+
+```text
+src/experiments/single_uav_bc_v2_dagger.py
+tests/test_single_uav_bc_v2_dagger.py
+data/synthetic/single_uav_bc_v2_oracle_seed2026/
+data/synthetic/single_uav_dagger_round1_seed2026/
+data/synthetic/single_uav_dagger_actor_seed2026/
+data/synthetic/single_uav_dagger_evaluation_seed2026/
+logs/preliminary/single_uav_bc_v2_oracle_seed2026/
+logs/preliminary/single_uav_dagger_round1_seed2026/
+logs/preliminary/single_uav_dagger_actor_seed2026/
+logs/preliminary/single_uav_dagger_evaluation_seed2026/
+plots/preliminary/single_uav_bc_v2_oracle_seed2026/
+plots/preliminary/single_uav_dagger_actor_seed2026/
+plots/preliminary/single_uav_dagger_evaluation_seed2026/
+```
+
+相关定向测试为 `21 passed`。DAgger 数据根目录及五个 evaluation role 根目录的
+`validate-preliminary` 均为 `ok=true`，checkpoint 在只读评估期间未被改写。
+
+## F：early_smooth + 径向对齐门控终端速度向量奖励
+
+在原始 `coef=0.25` baseline checkpoint 上完成了 F 单因素实验：保持
+`early_smooth` 目标速度曲线，以及 `90% normal full-distance + 10% terminal`
+的 navigation-preserving fine-tuning 调度；新增项仅为 `1–3 m` 区间的
+径向对齐门控终端 target-velocity-vector reward，系数为 `0.5`。未启用
+goal hold reward，未修改 braking reward、动作空间、动力学、PPO/MAPPO 参数、
+stable hold 判据或 validation/test 分布。
+
+正式 `100 train / 20 validation / 20 test` 结果（相同正常远距离 test 场景）：
+
+```text
+指标                         A baseline   C early-smooth   E ungated   F gated
+进入 8 m                     20/20        20/20            20/20       20/20
+进入 5 m                     17/20        20/20            20/20       20/20
+进入 3 m                     11/20        20/20            20/20       20/20
+进入 1 m                     1/20         2/20             0/20        9/20
+stable goal                  0/20         0/20             0/20        0/20
+最小目标距离                 0.468 m      0.821 m          1.062 m     0.180 m
+1 m 内平均速度               1.896 m/s    2.181 m/s        2.057 m/s   2.273 m/s
+平均最大连续保持步数         0.00         0.00             0.00        0.00
+保持步数 >=1 / >=3 / >=5     0/0/0        0/0/0            0/0/0       0/0/0
+```
+
+F 的向量奖励审计通过：激活距离来自 action 前估计距离，正奖励与非正径向运动
+的冲突计数为 `0`，奖励上界违规为 `0`，实际最大值约 `0.4394 <= 0.5`。
+因此 F 保住了远距离导航，并把进入 `1 m` 从 C 的 `2/20` 提高到 `9/20`；
+但 stable goal 仍为 `0/20`，当前瓶颈已转移到进入 `1 m` 后的低速连续保持，
+不能据此宣称已经完成稳定停车。
+
+F 正式产物：
+
+```text
+src/experiments/single_uav_acef_comparison.py
+tests/test_single_uav_terminal_target_velocity_vector_reward.py
+data/synthetic/single_uav_F_radial_gated_vector05_early_smooth_seed2026/
+logs/preliminary/single_uav_F_radial_gated_vector05_early_smooth_seed2026/
+plots/preliminary/single_uav_F_radial_gated_vector05_early_smooth_seed2026/
+logs/preliminary/single_uav_acef_comparison_seed2026/
+plots/preliminary/single_uav_acef_comparison_seed2026/
+```
+
+F 相关定向测试为 `15 passed`；全量测试为 `409 passed, 5 skipped`，
+正式结果的 `validate-preliminary` 为 `ok=true`。本阶段到此停止，未自动加入
+goal hold reward 或继续修改其他机制。
+
+## 2026-09-12：hierarchical-dagger-v1 分层控制工程验证
+
+本阶段基于已验证的 single-UAV DAgger round-1 checkpoint，新增独立的
+`hierarchical-dagger-v1` 只读诊断协议，不替换原始 Local EKF + GAT + MAPPO
+直接输出 delta-v 的 baseline。层级数据流为：Local EKF estimated state → GAT/MAPPO
+高层通信与资源动作、临时 local waypoint → 冻结 DAgger low-level Actor → 合法
+physical delta-v → 现有 environment dynamics。DAgger checkpoint 未重新初始化、
+没有 optimizer、没有梯度更新；原 checkpoint 文件 SHA256 为
+`f6c83f451ce1d1bc23e4f51e2d2b27ba615ad0283058137adda0620bd2e35690`。
+
+当前 MAPPO action contract 保持不变：communication/measurement head、bandwidth/resource
+head 和三维运动 `delta_vx/delta_vy/delta_vz` 均仍存在；hierarchical smoke 仅丢弃
+高层 motion delta-v，通信动作继续由 MAPPO action heads 产生，低层三维 delta-v 由
+冻结 DAgger 执行。temporary waypoint 通过环境接口同步更新 estimated relative goal
+vector、goal distance、goal direction 和 braking-distance features；控制只读取
+Actor 可见的 estimated local observation，不读取 truth state。
+
+单 UAV waypoint 泛化正式评估覆盖 `30` 个 test episodes：三个距离段
+`2--5 m`、`5--8 m`、`8--10 m` 各 `10` 个 episode，覆盖前/后/左/右/上/下及四种
+斜向，共 `10` 个方向、`30` 个 geometry/noise seed 组合。三个距离段均为
+进入 waypoint 半径 `10/10`、stable `10/10`；总体进入 `8/5/3/1 m` 和 stable 均为
+`30/30`，collision 与 timeout 均为 `0/30`。总体平均每回合最小距离为 `0.6445 m`，
+1 m 内平均速度为 `0.4572 m/s`，平均最大连续保持为 `5` 步，保持步数
+`>=1/3/5` 均为 `30/30/30`。因此达到开发门槛 `reach >=95%`、`stable >=90%`。
+
+补充的只读动作诊断为：平均 action norm `0.2416 m/s`，平均径向 action projection
+`0.0628 m/s`，平均切向 action `0.1634 m/s`，平均 braking magnitude
+`0.0962 m/s`（实际执行 `0.0918 m/s`），braking action fraction `0.6642`，
+effective braking fraction `0.6292`，action clipping `0/30`、clipping fraction `0`。
+waypoint 初始状态三类 `rest/toward_waypoint/tangential` 各 `10` 个；步级 CSV 同时
+保留径向速度、目标速度、制动动作及有效制动等逐步记录。
+
+由于单 UAV waypoint 泛化通过，随后执行了只用于接口验证的 2 UAV hierarchical smoke，
+没有训练 MAPPO。两架 UAV 分别使用独立 Local EKF 和独立冻结 DAgger inference，
+GAT 正常读取邻居图，通信动作未被 DAgger 覆盖，delta-v 合法，低层 checkpoint
+文件哈希和 Actor 参数哈希前后一致；2 UAV episode 的核心 schema validator 为
+`ok=true`。该 smoke 只证明层级接口与数据流可运行，不代表未训练高层 MAPPO 已具备
+协同策略性能，也不等同于正式 2 UAV 训练结果。
+
+正式产物：
+
+```text
+src/experiments/single_uav_hierarchical_waypoint.py
+tests/test_single_uav_hierarchical_waypoint.py
+data/synthetic/single_uav_hierarchical_waypoint_generalization_seed2026/
+data/synthetic/two_uav_hierarchical_dagger_smoke_seed2026/
+logs/preliminary/single_uav_hierarchical_waypoint_generalization_seed2026/
+logs/preliminary/two_uav_hierarchical_dagger_smoke_seed2026/
+plots/preliminary/single_uav_hierarchical_waypoint_generalization_seed2026/
+plots/preliminary/two_uav_hierarchical_dagger_smoke_seed2026/
+```
+
+hierarchical 定向测试为 `14 passed`；正式单 UAV 输出的 `validate-preliminary`
+为 `ok=true`，2 UAV 输出由 `validate_episode_benchmark(scale_2)` 检查为 `ok=true`。
+`pytest tests` 的回归结果为 `410 passed, 5 skipped, 2 failed`；两项失败来自已有
+`safety_risk_screening` 绘图代码向当前 Matplotlib 版本传入不支持的 `tick_labels`
+参数，未涉及本阶段 hierarchical 代码。完整 `pytest -q` 另受项目根目录已有
+`pytest-tmp-e-*` 权限目录影响，未能完成收集。
+
+## 2026-09-13：Actor 障碍物观测可辨识性审计（只读）
+
+基于单 UAV 静态障碍物 Stage 1 formal checkpoint 和原始 `coef=0.25` baseline，新增
+`src/experiments/single_uav_obstacle_observation_audit.py`，构造六个固定距离、固定
+UAV/目标/速度且只改变障碍物方向的 paired probe：`front`、`left-front`、
+`right-front`、`left`、`right`、`behind`。审计只调用冻结 Actor inference，不执行
+`env.step`、optimizer 或 PPO 更新，并在运行前后核对 policy 与 checkpoint hash。
+
+runtime 结果显示当前 Actor 的 node feature 为 `39` 维，最终 actor context 为 `79` 维：
+15 个 estimated EKF state、15 个 covariance diagonal、3 个 goal-relative 分量、4 个
+障碍物标量聚合量（minimum clearance、box/sphere count、timestep）和 2 个制动描述量。
+六个方向在 Stage 1 checkpoint 上的 normalized node feature、actor context 和确定性
+Actor action 均完全相同；baseline 也得到相同结论。当前 Actor 没有 obstacle relative
+`dx/dy/dz`、bearing、绝对几何、障碍物 identity、pre-projection swept clearance 或
+unsafe flag。相对位置与完整障碍物几何仍由 centralized critic、safety layer 和
+diagnostics 使用，说明当前主要问题是 Blocker A：Actor 无法从输入中辨识主动左右绕障
+所需的方向信息，而不是 action space 缺少横向控制能力。
+
+本轮完整 `pytest tests` 为 `422 passed, 5 skipped`。首次运行因审计脚本 feature-table
+字段名错误留下的 3 个不完整 CSV 未被覆盖；修复后的完整产物写入独立的 `_rerun` 目录，
+原有 checkpoint 与既有实验目录未修改。下一步应先在新的 opt-in observation contract
+中增加 UAV-local obstacle relative direction/geometry feature，完成 observation-only
+smoke 后，再生成近障碍物 oracle/DAgger 数据；本轮没有修改 reward、curriculum、动力学、
+action space、safety projection 或 checkpoint。
+
+审计产物：
+
+```text
+logs/preliminary/single_uav_obstacle_observation_audit_seed2026_rerun/
+plots/preliminary/single_uav_obstacle_observation_audit_seed2026_rerun/
+```
+
+## 2026-09-13：Stage 2A UAV-relative 静态障碍物方向观测增强（只读）
+
+在 Blocker A 审计基础上，新增可选的
+`single_uav_obstacle_direction_features_enabled` observation contract。默认值为
+`false`，因此历史 39 维 node observation 和旧 checkpoint 行为保持不变；启用后在旧
+前缀之后追加 3 个 feature，node dimension 为 `42`。新增索引为 `39--41`，分别是
+`relative_obstacle_dx_body_m`、`relative_obstacle_dy_body_m` 和
+`relative_obstacle_dz_body_m`。
+
+方向量使用 EKF estimated position/yaw，而不使用真实 UAV pose。坐标约定为 ENU 世界坐标
+（`+x` east、`+y` north、`+z` up）转换到 UAV yaw/body frame（`+x` forward、`+y`
+left、`+z` up）。最近物理障碍物按 point-to-surface minimum clearance 选择，
+`obstacle_id` 作为等距时的确定性 tie-break；clearance 和方向向量因此来自同一障碍物。
+无物理障碍物时方向量为有限的 `[0, 0, 0]`，由原有 box/sphere count 区分缺失与中心障碍物。
+
+Stage 1 checkpoint 通过显式 migration 生成独立的 42 维兼容 checkpoint：旧 GAT 首层和
+critic 首层的历史输入 slice 原样复制，新增输入列置零，ObservationNormalizer 的旧 39
+维统计原样保留，新统计使用 `mean=0、scale=1、count=0`；central normalizer 从 `171`
+维扩展到 `174` 维。迁移和 probe 全程没有调用 PPO/MAPPO update，Stage 1 与 baseline
+源 checkpoint SHA256 保持不变。
+
+六方向 probe 的左右与前后输入均已可辨识，旧 39 维前缀差异为 `0`；迁移初始状态下
+actor context/action 差异为 `0`，符合新增权重置零的兼容预期。这只证明方向信息已经
+进入 Actor observation，不代表 Actor 已经学会主动避障。
+
+Stage 2A 产物：
+
+```text
+src/experiments/single_uav_obstacle_direction_observation_stage2a.py
+tests/test_single_uav_obstacle_direction_observation_stage2a.py
+data/synthetic/single_uav_obstacle_direction_observation_stage2a_seed2026/
+logs/preliminary/single_uav_obstacle_direction_observation_stage2a_seed2026/
+plots/preliminary/single_uav_obstacle_direction_observation_stage2a_seed2026/
+```
+
+Stage 2A 定向测试 `9 passed`，完整回归为 `431 passed, 5 skipped`；observation-only smoke
+通过，`stage2a_passed=true`。Stage 2B near-obstacle Oracle + DAgger 仅具备设计前置条件，
+本阶段未自动执行。
+
+为补齐“原始 flag=false baseline checkpoint”兼容性审计，另生成了不覆盖原 smoke 的
+独立复核目录：
+
+```text
+data/synthetic/single_uav_obstacle_direction_observation_stage2a_seed2026_rerun/
+logs/preliminary/single_uav_obstacle_direction_observation_stage2a_seed2026_rerun/
+plots/preliminary/single_uav_obstacle_direction_observation_stage2a_seed2026_rerun/
+```
+
+复核报告确认 baseline 39 维 checkpoint 在 flag=false 下精确加载，Stage 1 checkpoint
+迁移后为 42 维；两者均通过 normal/static probe，未调用训练更新，源 checkpoint hash
+保持不变。
+
+## 2026-09-13：Stage 2B 近障碍物几何 Oracle + DAgger smoke
+
+基于 Stage 2A 的 42 维方向观测，新增独立的
+`src/experiments/single_uav_obstacle_dagger_stage2b.py`。该模块复用了现有环境动作接口、
+EKF 可见状态提取、checkpoint 加载、Actor-only imitation trainer、episode trace writer
+和 Stage 2A probe；没有修改动力学、动作空间、reward、PPO/MAPPO、safety mode 或已有
+checkpoint。Oracle 只使用 EKF estimated position/velocity/yaw、Stage 2A 障碍物方向特征
+和静态障碍物几何，通过正常 `environment.step(delta_v)` 产生绕行动作，不读取 truth state，
+不 teleport。
+
+smoke 运行顺序为 feature-scale preflight、统一 relevant-obstacle selector、Oracle
+safety-off/on sanity、DAgger 数据收集、Actor-only BC 更新和冻结 holdout 对照。训练集
+调度严格为 `21/30` normal far-distance 与 `9/30` static pressure，收集样本为 `2400`
+train、`600` validation，总计 `3000`；未使用 test 场景。Oracle sanity 的 safety-off/on
+均为 `0` collision、`9/10` passed obstacle，safety projection 为 `0`，说明 Oracle
+本身通过了进入 DAgger 的技术门槛。
+
+技术 smoke 流程完成：新增方向权重从零变为非零，Actor-only 训练 `8` 个 epoch，BC
+updates 为 `8`，DAgger rollout updates 与 PPO updates 均为 `0`；新增边界投影步数和
+episode 计数也写入汇总诊断。新增定向测试为 `8 passed`，完整回归为 `438 passed,
+5 skipped`。
+
+但行为验收未通过，不能进入 Stage 2B 正式实验：在小规模 holdout 中，Stage 2B normal
+test 仍为进入 8 m `5/5`，但进入 3 m 从冻结 Stage 2A 的 `5/5` 降为 `3/5`，进入 1 m
+为 `0/5`、stable 为 `0/5`；static unseen holdout 没有出现向目标的有效进展。方向 probe
+虽然动作已不再完全相同，但 left 与 right 两类的 lateral action 仍同号（分别约
+`-0.2700` 与 `-0.2682`），尚未形成正确的左右绕行符号。因此当前 blocker 是
+`static holdout no learned progress`、`left/right bypass action sign not learned`，并伴有
+小规模 normal navigation regression；这不是 observation blocker，也不能用 collision=0
+代替主动避障证据。
+
+最终 smoke 报告写入独立的 `rerun3` 目录。`stage2b_summary.json` 将技术流程完成与行为
+验收分开记录：`technical_smoke_passed=true`、`behavioral_acceptance_passed=false`、
+`stage2b_passed=false`；正式 100/20/20、multi-seed、reward 修改和下一阶段均未执行。
+
+```text
+src/experiments/single_uav_obstacle_dagger_stage2b.py
+tests/test_single_uav_obstacle_dagger_stage2b.py
+data/synthetic/single_uav_obstacle_dagger_stage2b_smoke_seed2026_rerun3/
+logs/preliminary/single_uav_obstacle_dagger_stage2b_smoke_seed2026_rerun3/
+plots/preliminary/single_uav_obstacle_dagger_stage2b_smoke_seed2026_rerun3/
+```
+
+该自定义 DAgger smoke 目录不包含 formal `scale_1` benchmark 根结构，因此通用
+`validate-preliminary` 对它返回 `ok=false`（空 scale 集合），这属于验证器适用范围限制，
+不是 episode trace 已损坏；本阶段以专用 summary、CSV、checkpoint identity、trace
+writer 输出和 pytest 回归作为验收依据。
+
+## 2026-09-13：Stage 2B-R 左右平衡迭代 DAgger smoke
+
+针对上一轮 Stage 2B 的左右监督偏置，新增独立的
+`src/experiments/single_uav_obstacle_dagger_stage2br.py`，并配套
+`tests/test_single_uav_obstacle_dagger_stage2br.py`。本轮只使用 Stage 2A 的 42 维观测、
+现有环境动作接口和 Actor-only BC；没有启用 PPO，也没有修改 reward、动力学、动作空间、
+动作映射、safety mode 或已有 checkpoint。Oracle 使用 Actor 可见的 EKF 状态、方向观测
+和静态几何，镜像场景严格平衡 left/right，并按 3 轮 rollout → aggregate → BC 迭代。
+
+最终独立 smoke 目录为：
+
+```text
+data/synthetic/single_uav_obstacle_dagger_stage2br_smoke_seed2026_rerun4/
+logs/preliminary/single_uav_obstacle_dagger_stage2br_smoke_seed2026_rerun4/
+plots/preliminary/single_uav_obstacle_dagger_stage2br_smoke_seed2026_rerun4/
+```
+
+最终数据为 24 个 normal far-distance 与 12 个 static mirror-pressure episode，训练/验证
+样本为 `2700/900`，left/right Oracle query 均为 `600`，无轨迹泄漏。Oracle 方向符号
+probe 为 `4/4`，safety sanity 的 on/off 均为 `0/10` collision、`9/10` passed obstacle、
+`0` safety projection；3 轮 checkpoint 链和标准 `validate-preliminary` 均通过，后者返回
+`ok=true`、`summary_present=true`、`schema_version=episode-v1.3`。
+
+技术流程 gate 已通过，但行为 gate 未通过：最终 Actor 的 left/left-front lateral sign
+正确，而 right/right-front 仍为错误负号（`2/4`）；静态 mirror-pressure 的
+`entered_3m` 与 `entered_1m` 均为 `0/4`，boundary drift 也未通过。因此按提示要求没有
+运行 holdout，也没有进入正式 Stage 2B 实验。当前结论是监督数据和 Oracle 链路已修正，
+但 Actor 仍存在 direction imitation / static trajectory execution blocker，不能把这次
+smoke 视为主动避障成功证据。
+
+本轮新增定向测试为 `13 passed`。在项目临时目录权限修正后，完整 pytest 为 `442 passed,
+5 skipped`，另有 2 个与本轮无关的既有 `safety_risk_screening` Matplotlib API 失败，原因是
+当前 Matplotlib 不接受该模块中的 `boxplot(labels=...)` 参数；本轮未修改该模块。
+
+## 2026-09-13：Stage 2B-R2 Actor 左右避障学习瓶颈诊断
+
+新增独立诊断入口
+`src/experiments/single_uav_obstacle_stage2br2_learning_bottleneck.py` 和对应契约测试
+`tests/test_single_uav_obstacle_stage2br2_learning_bottleneck.py`。本阶段从 Stage 2A 的
+42 维观测兼容 checkpoint 开始，只使用估计状态、严格镜像静态障碍物和
+Actor-only tiny BC；没有 PPO 更新，也没有修改 reward、动力学、动作空间、safety、
+Stage 2A/2B-R 旧目录或 checkpoint。
+
+独立结果写入：
+
+```text
+data/synthetic/single_uav_obstacle_stage2br2_learning_bottleneck_seed2026/
+logs/preliminary/single_uav_obstacle_stage2br2_learning_bottleneck_seed2026/
+plots/preliminary/single_uav_obstacle_stage2br2_learning_bottleneck_seed2026/
+```
+
+8 个严格镜像 pair（32 samples，train/validation 为 24/8，pair-level 无泄漏）的监督
+目标审计通过；左右 Oracle target 符号正确，右侧样本梯度非零并朝目标方向，左右梯度未
+显示主要抵消。四个 tiny-BC 范围均在受控镜像数据上达到 `4/4`：仅解冻 `39:42`、完整
+第一 GAT 层、Actor 后端/action head、完整 Actor 均可学习正确符号。因此该问题不是
+observation、Oracle target 或 BC/action indexing 的直接错误，而是 sequential rollout
+分布与行为组合仍未被 tiny overfit 证明。
+
+只有最小 `39:42` scope 被用于后续 4-episode static smoke。它虽表现为 4/4 左右自适应
+横向动作，但仅 2/4 episode 通过 obstacle/post-bypass 判据，且 boundary projection
+未改善；因此 `stage2br2_passed=false`、`eligible_for_next_stage=false`，不应直接进入
+正式 100/20/20。R2 summary、梯度 CSV、ablation checkpoint 和诊断图位于上述独立目录。
+
+本阶段新增测试 `7 passed`，与 Stage 2A/Stage 2B-R 的相关回归合计 `21 passed`；项目完整
+pytest 为 `449 passed, 5 skipped, 2 failed`，两项失败均为本轮之前已存在的
+`safety_risk_screening.py` Matplotlib `boxplot(labels=...)` API 兼容问题。
+
+## 2026-09-13：Stage 2B-R2 Follow-up sequential bypass / post-bypass recovery
+
+新增独立的 Follow-up 诊断入口
+`src/experiments/single_uav_obstacle_stage2br2_followup.py`，配套契约测试
+`tests/test_single_uav_obstacle_stage2br2_followup.py`。本阶段严格限制为冻结 scope
+rollout、极小规模 Actor-only sequential DAgger 和只读诊断；没有运行正式 100/20/20，
+没有运行 PPO，也没有修改 reward、observation、动力学、动作空间、safety/boundary 规则
+或既有 gate。由于早期输出目录已有部分结果且不允许破坏性删除，最终完整结果写入独立
+`rerun6` 目录，既有目录均保留。
+
+```text
+src/experiments/single_uav_obstacle_stage2br2_followup.py
+tests/test_single_uav_obstacle_stage2br2_followup.py
+data/synthetic/single_uav_obstacle_stage2br2_followup_seed2026_rerun6/
+logs/preliminary/single_uav_obstacle_stage2br2_followup_seed2026_rerun6/
+plots/preliminary/single_uav_obstacle_stage2br2_followup_seed2026_rerun6/
+```
+
+Step 1 在完全相同的 4 个 static smoke 场景中得到：Stage 2A frozen 为 direction `0/4`、
+passed/post-progress `2/4`、safety projection `173`；R2 `39:42` 为 direction `4/4`、
+passed/post-progress `2/4`、boundary projection `117`；actor-head 为 direction、
+passed/post-progress `4/4`、boundary projection `88`；full Actor 为 direction/passed
+`4/4`、post-progress `2/4`、boundary projection `140`。actor-head 是行为上更好的最小
+候选，但仍未满足完整 gate，因此执行了极小 sequential DAgger。
+
+DAgger 数据包含 8 episodes、800 samples、4 个 mirror pairs，left/right 各 400 samples，
+类别 left/right/left-front/right-front 各 200 samples；train/validation 按 mirror pair
+划分且无 trajectory 或 pair 泄漏。实际 phase 计数为
+`decision=8、bypass=164、post_bypass=600、recovery=4、boundary_onset=24`，其中
+`approach` 没有样本，phase imbalance ratio 为 `150`，这本身构成后续数据覆盖审计的证据。
+BC 仅训练 actor-head，critic、normalizer、log_std 冻结，PPO updates 为 `0`，44 个 epoch
+后最佳 validation MSE 为 `0.018655`。
+
+post-DAgger 同场景复评中 sequential policy 为 direction `3/4`、passed/post-progress
+`1/4`、recovery `0/4`、boundary projection `204`、safety projection `0`、collision `0`；
+相较 R2 的 `117` boundary steps 没有改善。按阶段拆分后，post-DAgger candidate 的 `204`
+个 boundary steps 全部发生在 obstacle passed 之前，说明候选策略在完成绕障前就发生了
+侧向漂移；而 sequential DAgger 数据收集阶段的 `228/228` 个 boundary steps 发生在
+obstacle passed 之后，直接暴露出 post-bypass lateral persistence。`safety projection
+174→0` 不能解释为 autonomous avoidance 改善，而与干预转移到 boundary layer 相容。
+normal-navigation smoke 通过代码的弱保护门，但候选 mean minimum goal distance 约
+`18.80 m`，明显差于 Stage 2A 的约 `8.87 m`，因此不能宣称无退化；最终 summary 还明确
+记录 entered-8m 为 Stage 2A `1/4`、候选 `0/4`。
+
+最终标记为 `stage2br2_followup_passed=false`、`eligible_for_next_stage=false`，当前唯一
+下一步为先做只读的 post-bypass recovery / boundary-onset state-coverage audit，之后再决定
+是否重新收集 DAgger 数据；暂不进行正式训练、PPO 或新的奖励改动。新增 Follow-up 定向测试
+为 `10 passed`，Stage 2A/2B/2B-R/2B-R2 相关回归合计 `43 passed`。全量 pytest 为
+`459 passed, 5 skipped, 2 failed`；两项仍是未被本阶段修改的
+`safety_risk_screening.py` 中 Matplotlib `boxplot(labels=...)` 兼容性失败。
+
+## 2026-09-13：Stage 2B-R2-R3 post-bypass recovery / boundary-onset coverage audit
+
+新增隔离的 coverage-audit 入口
+`src/experiments/single_uav_obstacle_stage2br2_r3_coverage_audit.py`，配套测试
+`tests/test_single_uav_obstacle_stage2br2_r3_coverage_audit.py`。本阶段只修正诊断阶段判定、
+coverage 场景和 episode-phase capped dataset 视图，没有进行 BC/PPO，也没有修改 reward、
+动力学、动作空间、observation、safety/boundary projection 或 collision 判据。
+
+最终独立结果写入：
+
+```text
+data/synthetic/single_uav_obstacle_stage2br2_r3_coverage_audit_seed2026_rerun4/
+logs/preliminary/single_uav_obstacle_stage2br2_r3_coverage_audit_seed2026_rerun4/
+plots/preliminary/single_uav_obstacle_stage2br2_r3_coverage_audit_seed2026_rerun4/
+```
+
+16 个 episode、8 个 mirror pairs，train/validation 按 pair 划分且无泄漏。通过 state-only
+decision classifier 保留了真实 approach 状态，全部六个阶段均被多个 episode 覆盖；原始
+post_bypass 样本占比过高，但按 episode-phase 限额后的 phase imbalance 从 `159.875`
+降至 `16`。post-bypass lateral persistence 仍出现在 `12/16` 个 episode，boundary
+projection 共 `299` steps，其中 `296` steps 发生在 post-bypass；这说明 coverage 问题
+已经被单独暴露和缓解，但策略行为本身尚未解决。
+
+正常导航审计仍有退化警告：Stage2A frozen entered-8m 为 `1/4`，actor-head 为 `0/4`，
+candidate mean minimum goal distance 从约 `8.87 m` 变为约 `18.18 m`。因此本阶段不授予
+BC 或 PPO 资格，下一步仍需先审查 balanced DAgger 数据和 post-bypass 恢复动作。
+R3 及相关回归测试为 `48 passed`；全量 pytest 为 `464 passed, 5 skipped, 2 failed`，
+两个失败仍是未修改的 `safety_risk_screening.py` Matplotlib 兼容性问题。验证详情见
+`r3_execution_checks.json`。
+
+## 2026-09-14：单 UAV 静态障碍物 post-bypass recovery / goal DAgger + BC
+
+针对“绕障持续过久 → 横向漂移 → 边界层介入 → 无法恢复目标径向运动”的问题，新增独立入口
+`src/experiments/single_uav_static_obstacle_dagger_recovery_goal.py` 和契约测试
+`tests/test_single_uav_static_obstacle_dagger_recovery_goal.py`。本阶段使用 Actor 可见的
+EKF 估计状态、Stage 2A 方向观测和静态地图几何 Oracle 采集 DAgger demonstration，再从
+baseline 的 42 维迁移 checkpoint 做 Actor-only BC；critic、normalizer、log_std 冻结，未执行
+PPO，未修改 reward、动力学、动作空间、safety/boundary 机制或已有 checkpoint。
+
+训练 demonstration 使用多场景 seed、噪声 seed、左右镜像和不同起点/目标几何；train/validation
+按 trajectory/pair 隔离，并按 episode-phase 平衡采样。正式独立产物位于：
+
+```text
+data/synthetic/single_uav_static_obstacle_dagger_recovery_goal_seed2026_rerun2/
+logs/preliminary/single_uav_static_obstacle_dagger_recovery_goal_seed2026_rerun2/
+plots/preliminary/single_uav_static_obstacle_dagger_recovery_goal_seed2026_rerun2/
+```
+
+正式 demonstration 原始样本为 `train=6645、validation=1239`，平衡后为 `2826/612`，
+train/validation 分别覆盖 `72/16` 个 episode，trajectory/pair leakage 均为 `false`。
+BC-only 的 20-episode 正常远距离评估中，原始 baseline 为进入 8 m `20/20`、进入 1 m `1/20`；
+新 BC Actor 为进入 8 m `5/20`、进入 1 m `0/20`、stable `0/20`。静态 holdout 中 Oracle
+为通过障碍 `20/20`、进入 1 m `20/20`、stable `20/20`；BC Actor 为通过障碍 `13/20`、
+post-bypass recovery `13/20`，但进入 1 m 和 stable 均为 `0/20`，且发生 `319` 个
+pre-risk/safety-projection steps。因 BC 未满足 normal entered-8m `>=19/20` 的首要保护条件，
+本阶段不进入 PPO+BC anchor；下一步应先检查 demonstration coverage、BC 动作幅度/径向推进
+误差和训练样本权重，不能把 collision=0 或通过障碍代替稳定到达证据。
+
+smoke6 的 schema、checkpoint provenance、train/validation 隔离和 `ppo_updates=0` 均通过；
+正式 rerun2 的 12 个角色/split benchmark 目录 `validate-preliminary` 均返回 `ok=true`。
+项目测试目录回归为 `469 passed, 5 skipped`；直接扫描根目录会额外触及已有权限受限的
+`pytest-tmp-e-20260912`，该环境问题不属于本阶段代码。
+
+## 2026-09-14：Actor-action-constrained teacher 与 BC demo kind balance 复验
+
+针对前一轮发现的 teacher 几何欧氏范数约束与 MAPPO Actor 分量盒约束不一致问题，
+`src/experiments/single_uav_static_obstacle_dagger_recovery_goal.py` 增加了
+`ActorConstrainedBoundaryAwareGeometricObstacleOracleController`。该适配器复用原有
+估计状态几何绕障路线，仅调用已有 `actor_action_transform` 生成 Actor 可达的 teacher
+delta-v；静态 teacher sanity 为 `4/4` 进入 1 m、`4/4` stable、最大 hold 均为 5，且
+没有 pre-risk、safety projection、boundary projection 或 action clipping。
+
+随后发现按 episode-phase 独立截断会使 BC 样本偏向静态场景（正式 rerun3 为 static
+`2108` 对 normal `864`），导致远距离行为遗忘。新增确定性的 phase-stratified per-episode
+cap 后 kind equal-total balance，并增加对应契约测试；BC 仍为 post-tanh scaled physical
+delta-v 的简单 MSE，未修改 reward、动力学、动作空间或 PPO。新增回归为 `471 passed,
+5 skipped`，目标模块测试为 `6 passed`。
+
+独立 smoke10 和正式 balanced rerun4 产物分别位于：
+
+```text
+data/synthetic/single_uav_static_obstacle_dagger_recovery_goal_seed2026_smoke10/
+data/synthetic/single_uav_static_obstacle_dagger_recovery_goal_seed2026_actorconstrained_balanced_rerun4/
+logs/preliminary/single_uav_static_obstacle_dagger_recovery_goal_seed2026_smoke10/
+logs/preliminary/single_uav_static_obstacle_dagger_recovery_goal_seed2026_actorconstrained_balanced_rerun4/
+plots/preliminary/single_uav_static_obstacle_dagger_recovery_goal_seed2026_smoke10/
+plots/preliminary/single_uav_static_obstacle_dagger_recovery_goal_seed2026_actorconstrained_balanced_rerun4/
+```
+
+正式 rerun4 的 balanced demo 为 normal/static 各 `864` 条，trajectory/pair leakage 均为
+`false`。normal test 的 BC Actor 进入 8 m 为 `14/20`，静态 holdout 的 BC Actor 进入
+8 m、1 m、stable 均为 `0/20`；同一评估中 actor-constrained Oracle 为静态 `20/20`
+进入 1 m、`20/20` stable、最大连续 hold 为 5，且无安全层介入。故当前目标“学习到
+稳定静态绕障并恢复目标径向运动”仍未完成，且 BC 未达到 normal `>=19/20` 保护门；
+当前应继续检查 demonstration 状态覆盖/可观测 Markov 性与 BC 表达能力，不进入 PPO+BC
+anchor，也不加入 goal-hold reward。
+
+## 2026-09-14：Stage 2B-R3 Actor observation identifiability audit
+
+针对 rerun4 中 Oracle 能完成静态绕障而 BC Actor 不能完成 normal→bypass→recovery 闭环的
+问题，新增只读诊断模块
+`src/experiments/single_uav_stage2br3_observation_identifiability.py` 及其契约测试。
+本阶段没有执行 PPO/MAPPO、DAgger、BC 正式重训，也没有修改 reward、curriculum、动力学、
+动作空间、safety 或 stable 判据。输入严格锁定为
+`single_uav_static_obstacle_dagger_recovery_goal_seed2026_actorconstrained_balanced_rerun4`，
+train/validation 按 episode/scenario 保持独立。
+
+最终只读审计产物写入：
+
+```text
+data/synthetic/single_uav_stage2br3_observation_identifiability_seed2026_rerun3/
+logs/preliminary/single_uav_stage2br3_observation_identifiability_seed2026_rerun3/
+plots/preliminary/single_uav_stage2br3_observation_identifiability_seed2026_rerun3/
+```
+
+结果显示，42D Actor-visible normalized node observation 对 bypass/recovery 总体具有较强
+可辨识性：BYPASS_LEFT↔RECOVERY 与 BYPASS_RIGHT↔RECOVERY 的 held-out 线性 probe 准确率
+分别为 `0.980` 和 `0.970`，左右 bypass 直接 probe 为 `1.000`。Obstacle-geometry feature
+消融后线性 probe 从 `0.904` 降至 `0.771`，说明 Stage-2A 障碍物几何特征确实提供了重要
+信息；但没有显式 boundary-clearance、radial/tangential velocity 或 passed-state feature。
+
+近邻审计仍发现局部相似 observation 对应不同 teacher action：BYPASS_LEFT↔RECOVERY 的
+强冲突率约 `25.2%`，BYPASS_RIGHT↔RECOVERY 约 `19.1%`，合计记录到 `312/1433` 个强冲突
+候选。与此同时，balanced train 中 recovery 有 `157` 条、`23` 个 episode，检测到
+`42` 个 bypass→post/recovery transition；tiny-overfit 在当前 mean-path scope 的
+physical delta-v MSE 可降至约 `2.63e-5`，actor-head-only 则明显较弱。这表明“全局 phase
+不可辨识”或“当前 Actor 完全没有容量”都不成立，但局部 transition 条件冲突、时序闭环
+分布和 BC 泛化之间的关系仍未被本审计单独证明。
+
+因此本阶段按要求标记为 `INCONCLUSIVE`，Primary/Secondary/Tertiary cause 暂不强行排序，
+不自动进入 PPO+BC anchor；下一步应针对 transition-window 的局部冲突做受控诊断，而不是
+直接继续调 PPO 或加入 goal-hold reward。R3 targeted pytest 为 `8 passed`；全量回归为
+`438 passed, 5 skipped, 2 failed, 43 errors`，失败/错误来自既有项目的 pytest 临时目录
+权限和 `safety_risk_screening.py` 与当前 Matplotlib `boxplot(labels=...)` API 兼容性，
+不是 R3 诊断模块测试。
+
+## 2026-09-14：外部开源方法对照与 post-bypass recovery Teacher
+
+针对单 UAV 静态障碍物“绕障动作持续时间过长、横向漂移、边界层持续介入、无法恢复目标径向运动”
+的问题，新增独立入口 `src/experiments/single_uav_external_recovery_method_study.py`。
+该入口参考 DAgger 的 student-visited-state 标注、静态障碍物局部影响衰减和 sigmoid soft fusion，
+但没有复制外部任务结构，也没有修改 reward、动力学、动作空间、动作映射、PPO/MAPPO 或安全语义。
+Teacher 使用 42D Actor 可见估计状态与静态地图几何，绕障通过后以带迟滞的连续权重释放 bypass，
+并对估计切向速度施加 Teacher 标签侧阻尼；所有最终动作仍通过现有 Actor componentwise transform。
+
+正式输出位于：
+
+```text
+data/synthetic/single_uav_external_recovery_method_study_seed2026/
+logs/preliminary/single_uav_external_recovery_method_study_seed2026/
+plots/preliminary/single_uav_external_recovery_method_study_seed2026/
+```
+
+20 个静态 Teacher-only 场景中，8/3/1 m 进入率均为 `20/20`，post-bypass recovery 为 `20/20`，
+stable goal 为 `16/20`，最大连续保持步数均值为 `4.75`、最大为 `5`。随后完成的 Actor-only
+DAgger/BC 仅作为冻结学习诊断：normal test 进入 8 m 为 `15/20`，未达到 `>=19/20` 的导航保护门槛；
+因此本阶段停止在 BC，不自动进入 PPO+BC anchor。所有 12 个角色/分割评估目录的标准 schema
+校验均为 `ok=true`，全量测试为 `483 passed, 5 skipped`。详细证据见
+`logs/preliminary/single_uav_external_recovery_method_study_seed2026/` 下的
+`external_method_comparison.md`、`current_failure_root_cause.md`、`teacher_design_report.md`、
+`dagger_collection_report.md` 和 `final_evaluation_report.md`。
+
+## 2026-09-14：Stage 2B-R4 BC / DAgger policy-preservation audit
+
+界面重启恢复检查确认本阶段实验进程已结束，未重复启动训练或评估。R4 的 E0 control、E1
+distance×phase sampling、E2 四种 Actor mean 解冻范围和统一 normal/static holdout 评估均已
+写入 `data/synthetic/single_uav_stage2br4_bc_policy_preservation_seed2026/`、
+`logs/preliminary/single_uav_stage2br4_bc_policy_preservation_seed2026/` 和对应 `plots/`。
+E0 复现、20 个评估根目录的 schema 校验均通过；E3 因没有候选同时满足 normal 与 static 核心
+门槛而按协议跳过，未进入 PPO。E1/E2 中最接近 normal 导航门槛的是 E1 与 E2-C（均为
+`19/20` 进入 8 m），但 static holdout 均未达到既定保持/恢复门槛，因此当前停止在 R4。
+本轮相关 targeted pytest 为 `7 passed`；全量回归的剩余失败来自既有 pytest 临时目录权限和
+`safety_risk_screening.py` 的 Matplotlib `boxplot(labels=...)` 兼容性，不属于 R4 变更。

@@ -148,6 +148,46 @@ def segment_intersects_obstacle(start: np.ndarray, end: np.ndarray, obstacle: Ob
     return segment_sphere_intersects(start, end, obstacle)
 
 
+def segment_obstacle_clearance(
+    start: np.ndarray,
+    end: np.ndarray,
+    obstacle: Obstacle,
+    *,
+    samples: int = 33,
+) -> float:
+    """Return a conservative swept surface clearance for one obstacle.
+
+    The environment's safety contract is segment based, whereas the legacy
+    ``collision_event`` helper only evaluates the post-step endpoint.  This
+    diagnostic/reward helper evaluates the same candidate segment before any
+    safety projection.  Exact contact is reported as zero; otherwise a dense
+    deterministic segment sampling gives a finite clearance estimate for both
+    boxes and spheres.  The helper is intentionally pure and never mutates an
+    obstacle or simulator state.
+    """
+
+    if not obstacle.active or not is_physical_obstacle(obstacle):
+        return float("inf")
+    if segment_intersects_obstacle(start, end, obstacle):
+        return 0.0
+    try:
+        count = max(2, int(samples))
+        start_array = np.asarray(start, dtype=float).reshape(3)
+        end_array = np.asarray(end, dtype=float).reshape(3)
+    except (TypeError, ValueError):
+        return float("inf")
+    if not np.isfinite(start_array).all() or not np.isfinite(end_array).all():
+        return float("inf")
+    values = [
+        point_obstacle_distance(
+            start_array + (end_array - start_array) * float(alpha),
+            obstacle,
+        )
+        for alpha in np.linspace(0.0, 1.0, count)
+    ]
+    return float(min(values, default=float("inf")))
+
+
 def moving_obstacle_swept_segment_intersects(
     start: np.ndarray,
     end: np.ndarray,
@@ -469,6 +509,7 @@ __all__ = [
     "line_of_sight",
     "point_obstacle_distance",
     "segment_intersects_obstacle",
+    "segment_obstacle_clearance",
     "moving_obstacle_swept_segment_intersects",
     "segment_minimum_distance",
     "joint_motion_collision_diagnostics",

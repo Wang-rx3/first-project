@@ -408,7 +408,11 @@ def _plot_screening(path: Path, scenario_rows: Sequence[Mapping[str, Any]]) -> N
         [float(row["minimum_clearance_m"]) for row in grouped[mode]] or [np.nan]
         for mode in modes
     ]
-    axes[0, 1].boxplot(data, labels=["projection on", "projection off"], showmeans=True)
+    axes[0, 1].boxplot(
+        data,
+        labels=["projection on", "projection off"],
+        showmeans=True,
+    )
     axes[0, 1].axhline(2.0, color="#d62728", linestyle="--", linewidth=1.0, label="safety threshold")
     axes[0, 1].set_ylabel("minimum clearance (m)")
     axes[0, 1].set_title("Scenario-level minimum clearance")

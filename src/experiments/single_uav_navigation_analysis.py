@@ -35,6 +35,11 @@ def _finite_mean(values: Sequence[float]) -> float:
     return float(np.mean(finite)) if finite.size else float("nan")
 
 
+def _finite_max(values: Sequence[float]) -> float:
+    finite = np.asarray([value for value in values if np.isfinite(value)], dtype=float)
+    return float(np.max(finite)) if finite.size else float("nan")
+
+
 def _distance_target_speed(
     distance_m: float,
     *,
@@ -220,6 +225,7 @@ def _episode_rows(
     target_speed_far_mps: float,
     braking_acceleration_mps2: float = 2.0,
     braking_margin_m: float = 2.0,
+    braking_distance_speed_profile: str = "legacy",
     max_speed_mps: float = 12.0,
 ) -> tuple[list[dict[str, Any]], list[dict[str, float]]]:
     episode_rows: list[dict[str, Any]] = []
@@ -276,11 +282,13 @@ def _episode_rows(
                             else braking_distance_target_speed(
                                 distance,
                                 goal_threshold_m=goal_threshold_m,
+                                near_goal_radius_m=near_goal_radius_m,
                                 stable_speed_mps=speed_threshold_mps,
                                 braking_acceleration_mps2=braking_acceleration_mps2,
                                 braking_margin_m=braking_margin_m,
                                 far_target_speed_mps=target_speed_far_mps,
                                 max_speed_mps=max_speed_mps,
+                                speed_profile=braking_distance_speed_profile,
                             )
                         )
                         if speed_control_mode
@@ -366,6 +374,7 @@ def _episode_rows(
             # ``speeds`` is aligned with finite-distance rows in the canonical
             # reward log; a trajectory fallback remains timestamp-aligned in
             # the same loop above.
+            maximum_stable_steps = _finite_max(stable_step_values)
             episode_rows.append(
                 {
                     "split": split,
@@ -381,11 +390,8 @@ def _episode_rows(
                     "entered_near_goal": int(bool(near_indices)),
                     "entered_goal_radius": int(bool(goal_indices)),
                     "stable_goal": int(any(stable_flags)),
-                    "maximum_stable_steps": (
-                        float(max(stable_step_values))
-                        if stable_step_values
-                        else float("nan")
-                    ),
+                    "maximum_stable_steps": maximum_stable_steps,
+                    "maximum_consecutive_goal_hold_steps": maximum_stable_steps,
                     "required_stable_hold_steps": (
                         float(max(stable_hold_step_values))
                         if stable_hold_step_values
@@ -438,6 +444,33 @@ def _split_summary(
         entering_near = sum(int(row.get("entered_near_goal", 0)) for row in subset)
         entering_goal = sum(int(row.get("entered_goal_radius", 0)) for row in subset)
         stable = sum(int(row.get("stable_goal", 0)) for row in subset)
+        maximum_consecutive_goal_hold_steps = _finite_max(
+            [
+                _number(
+                    row.get(
+                        "maximum_consecutive_goal_hold_steps",
+                        row.get("maximum_stable_steps"),
+                    )
+                )
+                for row in subset
+            ]
+        )
+        maximum_consecutive_goal_hold_values = [
+            _number(
+                row.get(
+                    "maximum_consecutive_goal_hold_steps",
+                    row.get("maximum_stable_steps"),
+                )
+            )
+            for row in subset
+        ]
+        hold_threshold_counts = {
+            threshold: sum(
+                int(np.isfinite(value) and value >= threshold)
+                for value in maximum_consecutive_goal_hold_values
+            )
+            for threshold in (1, 3, 5)
+        }
         near_entry_speeds = [
             _number(row.get("speed_at_near_goal_entry_mps"))
             for row in subset
@@ -524,6 +557,24 @@ def _split_summary(
             "entered_goal_radius_rate": entering_goal / count if count else 0.0,
             "stable_goal_episodes": stable,
             "stable_goal_rate": stable / count if count else 0.0,
+            "maximum_stable_steps": maximum_consecutive_goal_hold_steps,
+            "maximum_consecutive_goal_hold_steps": maximum_consecutive_goal_hold_steps,
+            "mean_maximum_consecutive_goal_hold_steps": _finite_mean(
+                maximum_consecutive_goal_hold_values
+            ),
+            "maximum_consecutive_goal_hold_steps_max": maximum_consecutive_goal_hold_steps,
+            "episodes_with_hold_steps_ge_1": hold_threshold_counts[1],
+            "episodes_with_hold_steps_ge_1_rate": (
+                hold_threshold_counts[1] / count if count else 0.0
+            ),
+            "episodes_with_hold_steps_ge_3": hold_threshold_counts[3],
+            "episodes_with_hold_steps_ge_3_rate": (
+                hold_threshold_counts[3] / count if count else 0.0
+            ),
+            "episodes_with_hold_steps_ge_5": hold_threshold_counts[5],
+            "episodes_with_hold_steps_ge_5_rate": (
+                hold_threshold_counts[5] / count if count else 0.0
+            ),
             "mean_speed_at_near_goal_entry_mps": _finite_mean(near_entry_speeds),
             "mean_speed_within_near_goal_mps": _finite_mean(near_mean_speeds),
             "mean_target_speed_within_near_goal_mps": _finite_mean(
@@ -767,6 +818,7 @@ def _plot_speed_distance(
     target_speed_far_mps: float,
     braking_acceleration_mps2: float,
     braking_margin_m: float,
+    braking_distance_speed_profile: str,
     max_speed_mps: float,
     output_path: Path,
 ) -> None:
@@ -818,11 +870,13 @@ def _plot_speed_distance(
                     else braking_distance_target_speed(
                         distance,
                         goal_threshold_m=goal_threshold_m,
+                        near_goal_radius_m=near_goal_radius_m,
                         stable_speed_mps=speed_threshold_mps,
                         braking_acceleration_mps2=braking_acceleration_mps2,
                         braking_margin_m=braking_margin_m,
                         far_target_speed_mps=target_speed_far_mps,
                         max_speed_mps=max_speed_mps,
+                        speed_profile=braking_distance_speed_profile,
                     )
                 )
                 for distance in target_distances
@@ -1011,6 +1065,9 @@ def analyze_single_uav_navigation(
     braking_margin_m = _number(
         reward_config.get("single_uav_braking_margin_m"), 2.0
     )
+    braking_distance_speed_profile = str(
+        reward_config.get("single_uav_braking_distance_speed_profile", "legacy")
+    )
     motion_contract = (
         scenario.get("motion_action_contract", {})
         if isinstance(scenario, Mapping)
@@ -1025,6 +1082,9 @@ def analyze_single_uav_navigation(
     stable_hold_steps = _number(
         reward_config.get("single_uav_stable_hold_steps"), 1.0
     )
+    terminal_radial_progress_reward_coef = _number(
+        reward_config.get("single_uav_terminal_radial_progress_reward_coef"), 0.0
+    )
     rows, speed_distance_rows = _episode_rows(
         scale_path,
         goal_threshold_m=goal_threshold_m,
@@ -1034,6 +1094,7 @@ def analyze_single_uav_navigation(
         target_speed_far_mps=target_speed_far_mps,
         braking_acceleration_mps2=braking_acceleration_mps2,
         braking_margin_m=braking_margin_m,
+        braking_distance_speed_profile=braking_distance_speed_profile,
         max_speed_mps=max_speed_mps,
     )
     if not rows:
@@ -1062,6 +1123,7 @@ def analyze_single_uav_navigation(
         target_speed_far_mps=target_speed_far_mps,
         braking_acceleration_mps2=braking_acceleration_mps2,
         braking_margin_m=braking_margin_m,
+        braking_distance_speed_profile=braking_distance_speed_profile,
         max_speed_mps=max_speed_mps,
         output_path=relation_plot,
     )
@@ -1089,7 +1151,15 @@ def analyze_single_uav_navigation(
             "target_speed_far_mps": float(target_speed_far_mps),
             "braking_acceleration_mps2": float(braking_acceleration_mps2),
             "braking_margin_m": float(braking_margin_m),
+            "braking_distance_speed_profile": braking_distance_speed_profile,
             "stable_hold_steps": float(stable_hold_steps),
+            "terminal_radial_progress_reward_coef": float(
+                terminal_radial_progress_reward_coef
+            ),
+            "terminal_radial_progress_activation_band_m": [
+                float(goal_threshold_m),
+                float(reward_config.get("single_uav_terminal_braking_radius_m", 3.0)),
+            ],
             "max_speed_mps": float(max_speed_mps),
             "braking_tolerance_mps": float(BRAKING_DIAGNOSTIC_TOLERANCE_MPS),
         },
@@ -1097,6 +1167,8 @@ def analyze_single_uav_navigation(
         "transformations": {
             "minimum_goal_distance": "minimum finite current_goal_distance per episode",
             "entry_rates": "indicator that any finite step enters the configured radius",
+            "maximum_consecutive_goal_hold_steps": "maximum finite consecutive stable-goal counter per episode, aggregated by split; sourced from single_uav_stable_steps",
+            "hold_duration_summary": "mean and maximum of per-episode maximum_consecutive_goal_hold_steps, plus episode counts/rates at thresholds >=1, >=3, and >=5; denominator is all episodes in the split",
             "near_goal_speed": "speed at first near-goal sample and mean/min speed over near-goal samples",
             "speed_distance_relation": "raw finite step samples; no smoothing, resampling, or filtering beyond finite-value checks",
             "distance_target_speed": "piecewise-linear target speed from the recorded reward configuration; diagnostic overlay only",

@@ -1,0 +1,17 @@
+policy,stage,episode_count,rate
+bc_actor,total_episodes,20,1.0
+bc_actor,passed_obstacle,18,0.9
+bc_actor,post_bypass_recovery,18,0.9
+bc_actor,entered_8m,8,0.4
+bc_actor,entered_5m,3,0.15
+bc_actor,entered_3m,1,0.05
+bc_actor,entered_1m,0,0.0
+bc_actor,stable_goal,0,0.0
+oracle_teacher,total_episodes,20,1.0
+oracle_teacher,passed_obstacle,20,1.0
+oracle_teacher,post_bypass_recovery,20,1.0
+oracle_teacher,entered_8m,20,1.0
+oracle_teacher,entered_5m,20,1.0
+oracle_teacher,entered_3m,20,1.0
+oracle_teacher,entered_1m,20,1.0
+oracle_teacher,stable_goal,19,0.95

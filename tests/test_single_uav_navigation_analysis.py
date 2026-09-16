@@ -49,18 +49,24 @@ class SingleUAVNavigationAnalysisTests(unittest.TestCase):
                     "current_goal_distance",
                     "single_uav_speed_mps",
                     "single_uav_goal_stable",
+                    "single_uav_stable_steps",
+                    "single_uav_stable_hold_steps",
                 ],
             )
             writer.writeheader()
+            stable_steps = 0
             for index, (distance, speed, stable_value) in enumerate(
                 zip(distances, speeds, stable)
             ):
+                stable_steps = stable_steps + 1 if stable_value else 0
                 writer.writerow(
                     {
                         "timestamp": (index + 1) * 0.2,
                         "current_goal_distance": distance,
                         "single_uav_speed_mps": speed,
                         "single_uav_goal_stable": stable_value,
+                        "single_uav_stable_steps": stable_steps,
+                        "single_uav_stable_hold_steps": 5,
                     }
                 )
         with (episode / "actions.csv").open(
@@ -140,6 +146,46 @@ class SingleUAVNavigationAnalysisTests(unittest.TestCase):
             self.assertEqual(result["summary"]["train"]["entered_near_goal_episodes"], 1)
             self.assertEqual(result["summary"]["train"]["entered_goal_radius_episodes"], 1)
             self.assertEqual(result["summary"]["train"]["stable_goal_episodes"], 1)
+            self.assertEqual(
+                result["summary"]["train"]["maximum_consecutive_goal_hold_steps"],
+                1.0,
+            )
+            self.assertAlmostEqual(
+                result["summary"]["train"][
+                    "mean_maximum_consecutive_goal_hold_steps"
+                ],
+                1.0,
+            )
+            self.assertEqual(
+                result["summary"]["train"][
+                    "maximum_consecutive_goal_hold_steps_max"
+                ],
+                1.0,
+            )
+            self.assertEqual(
+                result["summary"]["train"]["episodes_with_hold_steps_ge_1"],
+                1,
+            )
+            self.assertEqual(
+                result["summary"]["train"]["episodes_with_hold_steps_ge_3"],
+                0,
+            )
+            self.assertEqual(
+                result["summary"]["train"]["episodes_with_hold_steps_ge_5"],
+                0,
+            )
+            self.assertAlmostEqual(
+                result["summary"]["train"]["episodes_with_hold_steps_ge_1_rate"],
+                1.0,
+            )
+            self.assertAlmostEqual(
+                result["summary"]["train"]["episodes_with_hold_steps_ge_3_rate"],
+                0.0,
+            )
+            self.assertAlmostEqual(
+                result["summary"]["train"]["episodes_with_hold_steps_ge_5_rate"],
+                0.0,
+            )
             self.assertEqual(result["summary"]["test"]["entered_near_goal_episodes"], 1)
             self.assertEqual(result["summary"]["test"]["entered_goal_radius_episodes"], 0)
             self.assertAlmostEqual(
@@ -152,6 +198,8 @@ class SingleUAVNavigationAnalysisTests(unittest.TestCase):
                 1.0,
             )
             self.assertTrue(metrics.exists())
+            header = metrics.read_text(encoding="utf-8").splitlines()[0]
+            self.assertIn("maximum_consecutive_goal_hold_steps", header)
             self.assertTrue((output / "navigation_failure_analysis.png").exists())
             self.assertTrue((output / "speed_distance_relation.png").exists())
             self.assertTrue((output / "braking_action_summary.png").exists())

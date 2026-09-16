@@ -1,0 +1,331 @@
+{
+  "visualization_task": "single_uav_current_run_visualization",
+  "run_id": "single_uav_external_recovery_method_study_seed2026_visualization_rerun_20260914_01",
+  "input_run": "D:\\research project\\logs\\preliminary\\single_uav_external_recovery_method_study_seed2026_visualization_rerun_20260914_01",
+  "dagger_log_root": "D:\\research project\\logs\\preliminary\\single_uav_external_recovery_method_study_seed2026_visualization_rerun_20260914_01\\dagger_bc",
+  "data_root": "D:\\research project\\data\\synthetic\\single_uav_external_recovery_method_study_seed2026_visualization_rerun_20260914_01",
+  "mappo_training_run": "D:\\research project\\logs\\preliminary\\single_uav_braking_progress025_seed2026",
+  "generated_at": "2026-09-14T12:38:29.338022+08:00",
+  "git": {
+    "commit": "78b7bce015fb54eaf4508f371f05dc0e7926829c",
+    "branch": "main",
+    "status": [
+      "M README.md",
+      " M src/cli.py",
+      " M src/experiments/formal.py",
+      " M src/experiments/pilot.py",
+      " M src/experiments/safety_risk_screening.py",
+      " M src/experiments/single_uav_navigation_analysis.py",
+      " M src/schema.py",
+      " M src/simulation/environment.py",
+      " M src/simulation/motion_model.py",
+      " M src/simulation/obstacle_model.py",
+      " M tests/test_motion_model.py",
+      " M tests/test_single_uav_braking_curriculum.py",
+      " M tests/test_single_uav_learning_reward.py",
+      " M tests/test_single_uav_navigation_analysis.py"
+    ]
+  },
+  "runtime": {
+    "python": "3.12.4 | packaged by Anaconda, Inc. | (main, Jun 18 2024, 15:03:56) [MSC v.1929 64 bit (AMD64)]",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "numpy": "1.26.4",
+    "matplotlib": "3.8.4"
+  },
+  "randomness": {
+    "evaluation_seed_values": [
+      2026,
+      4021000,
+      4021043,
+      4021086,
+      4021129,
+      4021172,
+      4021215,
+      4021258,
+      4021301,
+      4021344,
+      4021387,
+      4021430,
+      4021473,
+      4021516,
+      4021559,
+      4021602,
+      4021645,
+      4021688,
+      4021731,
+      4021774,
+      4021817
+    ],
+    "scenario_seed_policy": "taken from actual evaluation rows; no new seed selected for plotting"
+  },
+  "checkpoints": [
+    {
+      "path": "D:\\research project\\data\\synthetic\\single_uav_braking_progress025_seed2026\\scale_1\\checkpoints\\final.pt",
+      "sha256": "77d8702e500fe7d1750bcbba96b9aea238e9a982c0af88dd440881e1b7a9330c",
+      "bytes": 458875
+    },
+    {
+      "path": "D:\\research project\\data\\synthetic\\single_uav_dagger_actor_seed2026\\scale_1\\checkpoints\\best_validation.pt",
+      "sha256": "f6c83f451ce1d1bc23e4f51e2d2b27ba615ad0283058137adda0620bd2e35690",
+      "bytes": 465155
+    },
+    {
+      "path": "D:\\research project\\data\\synthetic\\single_uav_external_recovery_method_study_seed2026_visualization_rerun_20260914_01\\baseline_observation_migration\\checkpoints\\stage2a_observation_compatible_init.pt",
+      "sha256": "aeb3c07e44ad81a1ef9d9434e5f0d7895e6d811ba932c45fe0c6797986f8304a",
+      "bytes": 470739
+    },
+    {
+      "path": "D:\\research project\\data\\synthetic\\single_uav_external_recovery_method_study_seed2026_visualization_rerun_20260914_01\\dagger_bc\\baseline_observation_migration\\checkpoints\\stage2a_observation_compatible_init.pt",
+      "sha256": "0fab64c6b12484311f0d18f18965a8e1ba77c2ffc7b659b41d437eb3ad0e81e0",
+      "bytes": 470739
+    },
+    {
+      "path": "D:\\research project\\data\\synthetic\\single_uav_external_recovery_method_study_seed2026_visualization_rerun_20260914_01\\dagger_bc\\bc_final\\scale_1\\checkpoints\\best_validation.pt",
+      "sha256": "09d8d80c84636c3950e108133b46f22ade65ece6ea828aeee3526984c19e7fd1",
+      "bytes": 470403
+    },
+    {
+      "path": "D:\\research project\\data\\synthetic\\single_uav_external_recovery_method_study_seed2026_visualization_rerun_20260914_01\\dagger_bc\\bc_final\\scale_1\\checkpoints\\last_epoch.pt",
+      "sha256": "04db4698d4ab5d220656e98ad64d66289146854223010b42b648a43484bb0911",
+      "bytes": 469887
+    },
+    {
+      "path": "D:\\research project\\data\\synthetic\\single_uav_external_recovery_method_study_seed2026_visualization_rerun_20260914_01\\dagger_bc\\bc_round0\\scale_1\\checkpoints\\best_validation.pt",
+      "sha256": "e2139d7830d1bae3c4fd5ba72fc8ee85c94ef926e89b079f4d3050b609036ee0",
+      "bytes": 470403
+    },
+    {
+      "path": "D:\\research project\\data\\synthetic\\single_uav_external_recovery_method_study_seed2026_visualization_rerun_20260914_01\\dagger_bc\\bc_round0\\scale_1\\checkpoints\\last_epoch.pt",
+      "sha256": "dec56f21e430b4a93554838ab4f686594de881ef20334fb7e54c54c449e048c2",
+      "bytes": 469887
+    },
+    {
+      "path": "D:\\research project\\data\\synthetic\\single_uav_navigation_preserving_finetune_seed2026\\scale_1\\checkpoints\\final.pt",
+      "sha256": "083e07253f6d2f775509c46bc1959afae0f5e3bacf455fa476ad8df08e8cd795",
+      "bytes": 458235
+    }
+  ],
+  "scenario_config": {
+    "scenario_id": "scenario_e21aeadd2584972e",
+    "phase": "bc_only_static_holdout",
+    "uav_count": 1,
+    "duration_s": 20.0,
+    "max_steps": 100,
+    "units": {
+      "position": "m",
+      "time": "s",
+      "angles": "rad"
+    },
+    "motion_action_contract": {
+      "type": "continuous_3d_velocity_increment",
+      "vector_dimension": 3,
+      "units": "m/s per decision window",
+      "max_norm_mps": 0.6000000000000001,
+      "max_speed_mps": 12.0,
+      "max_acceleration_mps2": 3.0,
+      "decision_interval_s": 0.2,
+      "negative_delta_v_allowed": true,
+      "braking_supported": true,
+      "braking_signal": "negative projection of applied delta_v onto pre-action velocity",
+      "braking_tolerance_mps": 0.0001,
+      "speed_update": "clip(pre_velocity + applied_delta_v, max_speed_mps)"
+    },
+    "world_bounds": {
+      "min_m": [
+        0.0,
+        0.0,
+        2.0
+      ],
+      "max_m": [
+        200.0,
+        200.0,
+        60.0
+      ]
+    },
+    "initial_positions": {
+      "uav_00": [
+        32.0,
+        96.0,
+        20.0
+      ]
+    },
+    "goals": {
+      "uav_00": [
+        64.0,
+        96.0,
+        20.0
+      ]
+    },
+    "obstacle_specs": [
+      {
+        "obstacle_id": "stage2br_mirror_obstacle",
+        "obstacle_type": "static",
+        "geometry_type": "sphere",
+        "center_m": [
+          44.0,
+          100.5,
+          20.0
+        ],
+        "radius_m": 4.8,
+        "velocity_mps": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "active": 1,
+        "physical_collision_enabled": true
+      }
+    ],
+    "reward_config": {
+      "uncertainty_scale": 100.0,
+      "aoi_scale": 1.0,
+      "delay_scale": 1.0,
+      "collision_penalty": 10.0,
+      "energy_weight": 0.01,
+      "boundary_penalty_weight": 0.0,
+      "metric_scales": {
+        "uncertainty": 12.369676406233697,
+        "loss": 1.0,
+        "packet_loss": 1.0,
+        "aoi": 60.0,
+        "delay": 1.0,
+        "connectivity": 1.0
+      },
+      "metric_scale_source": "pooled_training_warmup_p95",
+      "uncertainty_normalization": "p95",
+      "weights": {
+        "uncertainty": 0.35,
+        "loss": 0.2,
+        "aoi": 0.15,
+        "delay": 0.15,
+        "connectivity": 0.15
+      },
+      "single_uav_learning_mode": "loc_goal_v2",
+      "single_uav_learning_weights": {
+        "localization_progress": 0.8,
+        "goal_progress": 0.2
+      },
+      "single_uav_goal_progress_coef": 1.0,
+      "single_uav_localization_cost_weight": 0.2,
+      "single_uav_goal_bonus": 5.0,
+      "single_uav_goal_threshold_m": 1.0,
+      "single_uav_goal_speed_threshold_mps": 0.5,
+      "single_uav_near_goal_radius_m": 8.0,
+      "single_uav_near_goal_speed_penalty_weight": 0.4,
+      "single_uav_speed_control_mode": "braking_distance",
+      "single_uav_target_speed_far_mps": 6.0,
+      "single_uav_braking_acceleration_mps2": 2.0,
+      "single_uav_braking_margin_m": 2.0,
+      "single_uav_braking_distance_speed_profile": "legacy",
+      "single_uav_stable_hold_steps": 5,
+      "single_uav_goal_hold_reward": 0.0,
+      "single_uav_speed_deficit_penalty_weight": 0.05,
+      "single_uav_goal_direction_coef": 0.75,
+      "single_uav_braking_action_reward_coef": 3.0,
+      "single_uav_target_velocity_action_reward_coef": 3.0,
+      "single_uav_terminal_braking_radius_m": 3.0,
+      "single_uav_terminal_braking_reward_coef": 0.0,
+      "single_uav_terminal_acceleration_penalty_coef": 0.0,
+      "single_uav_braking_progress_reward_coef": 0.25,
+      "single_uav_terminal_radial_progress_reward_coef": 0.0,
+      "single_uav_terminal_target_velocity_vector_reward_coef": 0.0,
+      "single_uav_terminal_target_velocity_vector_radial_gate_enabled": false,
+      "single_uav_braking_safety_projection_enabled": false,
+      "learning_reward_mode": "legacy",
+      "learning_reward_clip": 3.0,
+      "learning_collision_penalty_cap": 1.0,
+      "learning_potential_coef": 0.25,
+      "learning_gamma": 0.99,
+      "learning_feedback_mode": "v3",
+      "loc_progress_coef": 0.0,
+      "actual_measurement_cost_enabled": false,
+      "actual_measurement_cost_target": null,
+      "actual_measurement_cost_coef": 0.0,
+      "accepted_update_feedback_coef": 0.0,
+      "accepted_update_feedback_delay_steps": 1,
+      "accepted_update_feedback_location": 0.0,
+      "accepted_update_feedback_scale": 1.0,
+      "accepted_update_feedback_none_baseline": 0.0,
+      "potential_statistics": {
+        "source_split": "warmup",
+        "source": "warmup_only",
+        "u_center": 4.202273969737371,
+        "u_scale": 0.030913681110163696,
+        "c_center": 0.35,
+        "c_scale": 1.0,
+        "clip_range": [
+          -3.0,
+          3.0
+        ],
+        "epsilon": 1e-06,
+        "delta_u_scale": 0.001,
+        "delta_u_median": -0.0006635806278749712,
+        "delta_u_mad": 5.680407507480112e-06,
+        "delta_u_samples": 1000,
+        "delta_u_scale_floor_applied": true,
+        "delta_u_scale_source": "warmup_adjacent_window_mad",
+        "delta_u_definition": "u_previous_minus_u_current_same_episode",
+        "delta_goal_scale": 0.07643861371035571,
+        "delta_goal_median": -0.021159164379824347,
+        "delta_goal_mad": 0.05155713861483591,
+        "delta_goal_samples": 1000,
+        "delta_goal_scale_floor_applied": false,
+        "delta_goal_scale_source": "warmup_adjacent_window_mad",
+        "delta_goal_definition": "goal_distance_previous_minus_current_same_episode"
+      },
+      "potential_scale_source": "warmup",
+      "potential_epsilon": 1e-06,
+      "lambda_coll": 10.0,
+      "lambda_energy": 0.01
+    },
+    "termination_reason": "time_limit",
+    "safety_execution_mode": "legacy"
+  },
+  "run_summary": {
+    "status": "completed",
+    "training_performed": false,
+    "ppo_updates": 0,
+    "reward_or_environment_modified": false,
+    "dynamic_obstacles_used": false,
+    "bc_gates": {
+      "normal_entered_8m_ge_19_of_20": false,
+      "normal_entered_8m": 15,
+      "normal_gate_threshold": 19,
+      "normal_gate_is_formal_20_episode_gate": true,
+      "static_entered_8m": 8,
+      "static_entered_1m": 0,
+      "static_stable_goal": 0,
+      "ppo_allowed": false,
+      "decision": "stop_before_ppo_because_normal_navigation_gate_failed"
+    },
+    "contracts": {
+      "baseline_source_not_modified": true,
+      "observation_normalizer_frozen": true,
+      "critic_frozen": true,
+      "logstd_frozen": true,
+      "ppo_updates": 0,
+      "train_validation_pair_leakage": false,
+      "teacher_truth_state_read_for_control": false,
+      "validation_test_curriculum": false,
+      "static_only": true,
+      "stable_criterion_reused": true
+    }
+  },
+  "model_contract": {
+    "observation_dimension": "actual checkpoint migration and scenario metadata retained in source run summary",
+    "encoder_and_gat": "read from source metadata where present; visualization did not construct or change a network",
+    "trainable_groups_during_source_run": "Actor-only BC in source run; critic, normalizer and log_std frozen; PPO not run",
+    "visualization_updates": 0
+  },
+  "source_files_sha256_at_visualization": {
+    "src\\experiments\\single_uav_external_recovery_method_study.py": "c57e35a4925dbe10230c0ecfa4bfab792c72cf8ec6be1399413314da5cc4b1c3",
+    "src\\experiments\\single_uav_static_obstacle_dagger_recovery_goal.py": "b003ccf65bb610c0eef4f3831132391b9177fc814a43d9d4a38557f067601a6f",
+    "src\\simulation\\environment.py": "ebb26591961bb747454c2680cbd23922624afb998cb0842c04c0a4879a00addc",
+    "src\\simulation\\motion_model.py": "c6f930643b1070f208bac8932ceaa066a3af55f4404c2541aba5e6d704467f61"
+  },
+  "provenance_notes": [
+    "Current rerun was executed through the existing external-recovery entry point in a new independent output directory.",
+    "The rerun recorded ppo_updates=0; the loss figure uses the original baseline MAPPO/PPO training log.",
+    "Figures and CSVs are diagnostic artifacts and are not automatically manuscript evidence."
+  ]
+}

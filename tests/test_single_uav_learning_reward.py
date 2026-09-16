@@ -9,6 +9,7 @@ from src.simulation.environment import (
     RewardConfig,
     SimulationConfig,
     _distance_target_speed,
+    terminal_radial_progress_reward_components,
 )
 
 
@@ -385,6 +386,257 @@ def test_single_uav_target_velocity_action_shaping_prefers_braking_delta() -> No
     assert float(
         accelerating_components["single_uav_target_velocity_action_reward"]
     ) < -0.9
+
+
+def test_braking_progress_reward_tracks_overspeed_error_reduction() -> None:
+    environment = MultiUAVJointEnv(
+        SimulationConfig(
+            uav_count=1,
+            max_steps=2,
+            gnss_mode="denied",
+            reward=RewardConfig(
+                single_uav_learning_mode="loc_goal_v2",
+                single_uav_speed_control_mode="braking_distance",
+                single_uav_near_goal_radius_m=8.0,
+                single_uav_braking_acceleration_mps2=2.0,
+                single_uav_braking_margin_m=2.0,
+                single_uav_braking_progress_reward_coef=3.0,
+                potential_statistics=_statistics(),
+            ),
+        )
+    )
+    environment.reset(seed=42)
+    goal = environment.goals["uav_00"].copy()
+    position = goal + np.asarray([4.0, 0.0, 0.0])
+    environment.ekfs["uav_00"].state[:3] = position
+    environment.states["uav_00"].position_m[:] = position
+    environment.states["uav_00"].velocity_mps[:] = [3.4, 0.0, 0.0]
+    current_distance = environment.estimated_goal_distance()
+    environment._previous_estimated_goal_distance = current_distance + 1.0
+    environment._previous_position_logdet = environment._position_logdet_uncertainty()
+
+    _reporting, braking_info = environment._rewards(
+        0,
+        _actions(environment),
+        {
+            "uav_00": {
+                "delta_v_applied": [-0.6, 0.0, 0.0],
+                "pre_speed_mps": 4.0,
+                "post_speed_mps": 3.4,
+                "applied_longitudinal_delta_v_mps": -0.6,
+            }
+        },
+    )
+    braking_components = braking_info["learning_reward_components"]
+    assert float(braking_components["single_uav_pre_speed_excess_mps"]) > 0.0
+    assert float(braking_components["single_uav_post_speed_excess_mps"]) >= 0.0
+    assert float(braking_components["single_uav_braking_progress_signal"]) > 0.0
+    assert float(braking_components["single_uav_braking_progress_reward"]) > 0.0
+
+    _reporting, accelerating_info = environment._rewards(
+        0,
+        _actions(environment),
+        {
+            "uav_00": {
+                "delta_v_applied": [0.6, 0.0, 0.0],
+                "pre_speed_mps": 4.0,
+                "post_speed_mps": 4.6,
+                "applied_longitudinal_delta_v_mps": 0.6,
+            }
+        },
+    )
+    accelerating_components = accelerating_info["learning_reward_components"]
+    assert float(accelerating_components["single_uav_braking_progress_signal"]) < 0.0
+    assert float(accelerating_components["single_uav_braking_progress_reward"]) < 0.0
+
+
+def test_terminal_radial_progress_reward_is_positive_only_in_terminal_band() -> None:
+    outside = terminal_radial_progress_reward_components(
+        previous_goal_distance_m=4.0,
+        current_goal_distance_m=4.0,
+        actual_speed_mps=0.5,
+        target_speed_mps=1.0,
+        reward_coef=0.5,
+    )
+    assert outside["active"] is False
+    assert outside["reward"] == 0.0
+
+    low_speed_progress = terminal_radial_progress_reward_components(
+        previous_goal_distance_m=2.4,
+        current_goal_distance_m=2.0,
+        actual_speed_mps=0.8,
+        target_speed_mps=1.0,
+        reward_coef=0.5,
+    )
+    assert low_speed_progress["active"] is True
+    np.testing.assert_allclose(low_speed_progress["radial_progress_m"], 0.4)
+    assert float(low_speed_progress["speed_gate"]) == 1.0
+    assert float(low_speed_progress["reward"]) > 0.0
+
+    no_progress = terminal_radial_progress_reward_components(
+        previous_goal_distance_m=2.0,
+        current_goal_distance_m=2.0,
+        actual_speed_mps=0.8,
+        target_speed_mps=1.0,
+        reward_coef=0.5,
+    )
+    assert float(no_progress["reward"]) == 0.0
+
+    moving_away = terminal_radial_progress_reward_components(
+        previous_goal_distance_m=1.9,
+        current_goal_distance_m=2.0,
+        actual_speed_mps=0.8,
+        target_speed_mps=1.0,
+        reward_coef=0.5,
+    )
+    assert float(moving_away["radial_progress_m"]) == 0.0
+    assert float(moving_away["reward"]) == 0.0
+
+    overspeed_progress = terminal_radial_progress_reward_components(
+        previous_goal_distance_m=2.4,
+        current_goal_distance_m=2.0,
+        actual_speed_mps=2.0,
+        target_speed_mps=1.0,
+        reward_coef=0.5,
+    )
+    assert 0.0 < float(overspeed_progress["speed_gate"]) < 1.0
+    assert 0.0 < float(overspeed_progress["reward"]) < float(
+        low_speed_progress["reward"]
+    )
+
+    at_goal_boundary = terminal_radial_progress_reward_components(
+        previous_goal_distance_m=1.2,
+        current_goal_distance_m=1.0,
+        actual_speed_mps=0.1,
+        target_speed_mps=0.5,
+        reward_coef=0.5,
+    )
+    inside_goal = terminal_radial_progress_reward_components(
+        previous_goal_distance_m=1.2,
+        current_goal_distance_m=0.9,
+        actual_speed_mps=0.1,
+        target_speed_mps=0.5,
+        reward_coef=0.5,
+    )
+    assert float(at_goal_boundary["reward"]) == 0.0
+    assert float(inside_goal["reward"]) == 0.0
+
+
+def test_terminal_radial_progress_reward_is_added_without_changing_hold_rule() -> None:
+    environment = MultiUAVJointEnv(
+        SimulationConfig(
+            uav_count=1,
+            max_steps=3,
+            gnss_mode="denied",
+            reward=RewardConfig(
+                single_uav_learning_mode="loc_goal_v2",
+                single_uav_speed_control_mode="braking_distance",
+                single_uav_braking_distance_speed_profile="early_smooth",
+                single_uav_terminal_radial_progress_reward_coef=0.5,
+                single_uav_stable_hold_steps=3,
+                single_uav_goal_hold_reward=0.0,
+                learning_reward_clip=10.0,
+                potential_statistics=_statistics(),
+            ),
+        )
+    )
+    target = np.asarray([170.0, 170.0, 10.0])
+    environment.reset(
+        seed=42,
+        scenario_config={
+            "initial_positions": {"uav_00": (target + np.asarray([2.0, 0.0, 0.0])).tolist()},
+            "initial_velocities": {"uav_00": [0.0, 0.0, 0.0]},
+            "goals": {"uav_00": target.tolist()},
+            "obstacles": [],
+        },
+    )
+    environment.ekfs["uav_00"].state[:3] = target + np.asarray([2.0, 0.0, 0.0])
+    environment.states["uav_00"].position_m[:] = target + np.asarray([2.0, 0.0, 0.0])
+    environment.states["uav_00"].velocity_mps[:] = [0.4, 0.0, 0.0]
+    environment._previous_estimated_goal_distance = 2.4
+    environment._previous_position_logdet = environment._position_logdet_uncertainty()
+
+    _reporting, info = environment._rewards(
+        0,
+        _actions(environment),
+        {
+            "uav_00": {
+                "delta_v_applied": [0.0, 0.0, 0.0],
+                "pre_speed_mps": 0.4,
+                "post_speed_mps": 0.4,
+            }
+        },
+    )
+    components = info["learning_reward_components"]
+    assert components["single_uav_terminal_radial_progress_active"] is True
+    assert float(components["single_uav_terminal_radial_progress_reward"]) > 0.0
+    assert float(components["single_uav_terminal_radial_progress_reward_coef"]) == 0.5
+    assert float(components["single_uav_goal_hold_reward"]) == 0.0
+    assert int(components["single_uav_stable_steps"]) == 0
+
+
+def test_terminal_braking_rewards_real_deceleration_and_penalizes_acceleration() -> None:
+    environment = MultiUAVJointEnv(
+        SimulationConfig(
+            uav_count=1,
+            max_steps=2,
+            gnss_mode="denied",
+            reward=RewardConfig(
+                single_uav_learning_mode="loc_goal_v2",
+                single_uav_speed_control_mode="braking_distance",
+                single_uav_near_goal_radius_m=8.0,
+                single_uav_braking_acceleration_mps2=2.0,
+                single_uav_braking_margin_m=2.0,
+                single_uav_terminal_braking_radius_m=3.0,
+                single_uav_terminal_braking_reward_coef=3.0,
+                single_uav_terminal_acceleration_penalty_coef=2.0,
+                potential_statistics=_statistics(),
+            ),
+        )
+    )
+    environment.reset(seed=42)
+    goal = environment.goals["uav_00"].copy()
+    position = goal + np.asarray([2.0, 0.0, 0.0])
+    environment.ekfs["uav_00"].state[:3] = position
+    environment.states["uav_00"].position_m[:] = position
+    environment.states["uav_00"].velocity_mps[:] = [4.0, 0.0, 0.0]
+    current_distance = environment.estimated_goal_distance()
+    environment._previous_estimated_goal_distance = current_distance + 1.0
+    environment._previous_position_logdet = environment._position_logdet_uncertainty()
+
+    _reporting, braking_info = environment._rewards(
+        0,
+        _actions(environment),
+        {
+            "uav_00": {
+                "delta_v_applied": [-0.6, 0.0, 0.0],
+                "pre_speed_mps": 4.0,
+                "post_speed_mps": 3.4,
+                "applied_longitudinal_delta_v_mps": -0.6,
+            }
+        },
+    )
+    braking_components = braking_info["learning_reward_components"]
+    assert bool(braking_components["single_uav_terminal_braking_active"]) is True
+    assert float(braking_components["single_uav_terminal_speed_reduction_signal"]) > 0.9
+    assert float(braking_components["single_uav_terminal_braking_reward"]) > 0.0
+    assert float(braking_components["single_uav_terminal_acceleration_penalty"]) == 0.0
+
+    _reporting, accelerating_info = environment._rewards(
+        0,
+        _actions(environment),
+        {
+            "uav_00": {
+                "delta_v_applied": [0.6, 0.0, 0.0],
+                "pre_speed_mps": 4.0,
+                "post_speed_mps": 4.6,
+                "applied_longitudinal_delta_v_mps": 0.6,
+            }
+        },
+    )
+    accelerating_components = accelerating_info["learning_reward_components"]
+    assert float(accelerating_components["single_uav_terminal_braking_reward"]) == 0.0
+    assert float(accelerating_components["single_uav_terminal_acceleration_penalty"]) > 0.0
 
 
 def test_single_uav_stable_arrival_requires_consecutive_hold_steps() -> None:
