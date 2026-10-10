@@ -17,6 +17,14 @@
 
 ## 当前状态
 
+### 研究进度审计索引（2026-10-10）
+
+最新全局审计见 [硕士课题进度审计](knowledge/research_progress_audit_20261010.md)。下文包含历史阶段记录，不能把“准备完成/未执行”直接当作当前磁盘状态。当前多 UAV 主线已完成框架实现与单训练 seed 开发比较，尚未完成当前最终版本的多 seed、跨规模与独立泛化确认；最近工作集中在冻结单 UAV 策略的绕障、通过前衔接和终端稳定捕获。
+
+PASS_COMMIT `run_action_decomposition_fix_v1/` 已保存 OFF/ON 各 20 回合、各 2,185 行逐步轨迹。ON 在六个主要失败回合中实际介入 73 步，但两臂均为 11/20 通过障碍、10/20 稳定到达。最终 `evaluation_summary.json` 缺失；当前 evaluator 的 PASS_COMMIT 汇总引用了未定义的 `ALL_EPISODE_IDS`，因此只能记为“配对轨迹已有，最终汇总/验收未闭合”，不能记为完整实验验收通过。该缺陷与缺失产物一致，但没有该次终端堆栈，历史退出原因仍须保留这一证据边界。
+
+本次复核为 `1147 passed, 5 skipped, 3 failed`：两项绘图接口兼容失败，一项测试仍假定修复版结果目录不存在。符号审计通过，含 300 个规范符号、10 个历史符号。本次未修改研究代码、未训练或重新运行研究评估，未提交或推送；详细证据与审计范围见上述报告。
+
 ### 单 UAV 静态障碍物主动避障阶段 1 Smoke（2026-09-13）
 
 已新增独立入口 `src/experiments/single_uav_static_obstacle_avoidance.py`，从
@@ -4095,3 +4103,588 @@ E0 复现、20 个评估根目录的 schema 校验均通过；E3 因没有候选
 `19/20` 进入 8 m），但 static holdout 均未达到既定保持/恢复门槛，因此当前停止在 R4。
 本轮相关 targeted pytest 为 `7 passed`；全量回归的剩余失败来自既有 pytest 临时目录权限和
 `safety_risk_screening.py` 的 Matplotlib `boxplot(labels=...)` 兼容性，不属于 R4 变更。
+
+## 2026-09-16：可开关 Goal Recovery Correction Layer
+
+新增独立低层控制模块 `src/control/goal_recovery_correction.py`，用于冻结 Actor 评估中的
+post-bypass 目标恢复。模块只接收 Actor 可见的 EKF 估计位置、估计速度、场景目标位置和
+SoftFusion Teacher 已有的估计状态 `release_latched/pass_progress/route_phase` 信号；不接收
+simulator truth state，也不修改 UAV position、velocity、yaw 或 next state。
+
+配置集中在 `FormalExperimentConfig`，默认严格关闭：
+
+- `goal_recovery_correction_enabled=False`
+- `goal_recovery_radial_gain=0.8`
+- `goal_recovery_tangential_gain=0.7`
+- `goal_recovery_max_delta_v_mps=0.6`
+- `goal_recovery_activation_mode="post_bypass_only"`
+- `goal_recovery_alpha_ramp_enabled=True`
+
+冻结 evaluation 可通过 Python 参数 `goal_recovery_correction_enabled=True/False`，或 CLI
+`--goal-recovery-correction` / `--no-goal-recovery-correction` 做同 checkpoint 的 ON/OFF
+对照。未指定运行时覆盖时沿用配置值；旧 checkpoint 缺少新字段时使用 dataclass 默认值 OFF。
+Teacher/bootstrap、DAgger 采集与训练标签始终不经过该层。
+
+激活链为：`Actor physical delta-v + alpha * bounded correction` → 现有 Actor componentwise
+transform → braking supervisor → motion action/speed clipping 与积分 → boundary projection →
+scene safety projection。OFF、未 release、非 post-bypass 或 `alpha=0` 时结构性旁路矫正与
+二次 transform，原 Actor 动作逐元素直接进入旧执行链。step 日志补充 Actor 原始动作、径向/
+切向 correction、alpha、transform 前后动作、最终 applied 动作和 safety/boundary 标志，便于
+之后做因果归因。快速测试入口：
+
+```text
+python -m pytest tests/test_goal_recovery_correction.py -q
+```
+
+本次只完成代码、配置与单元测试；没有修改 reward、动力学、observation dimension、Actor/GAT/
+Critic、PPO/MAPPO/BC/DAgger 训练目标，也没有运行正式训练或 rollout。
+
+## 2026-09-16：Goal Recovery Correction 独立冻结 ON/OFF 评估入口
+
+新增 `src/experiments/single_uav_goal_recovery_correction_evaluation.py`。该入口只加载现有
+BC Actor checkpoint，并在同一份有序 static holdout manifest 上比较 correction OFF 与 ON；
+不会调用 external recovery 完整实验、DAgger/BC runner、Teacher action、bootstrap 或任何
+PPO/MAPPO/BC 更新。
+
+默认是 paired smoke，两种条件各使用相同的前 2 个 canonical static holdout 场景、seed、顺序、
+safety、boundary、max steps 和 checkpoint。只有显式传入 `--formal` 才选择 20 个场景。输出根
+必须尚不存在；paired 模式会在每个 data/logs/plots 根下创建独立 `off/`、`on/` 子目录，并在
+logs 根保存 `goal_recovery_correction_comparison.json/.csv`。
+
+PyCharm 可直接配置：
+
+```text
+Script path: D:\research project\src\experiments\single_uav_goal_recovery_correction_evaluation.py
+Working directory: D:\research project
+Parameters: --paired
+```
+
+单独模式可使用 `--goal-recovery-correction` 或 `--no-goal-recovery-correction`。默认 checkpoint
+是外部恢复研究已经生成的固定 `bc_final/scale_1/checkpoints/best_validation.pt`，也可通过
+`--checkpoint` 显式覆盖；脚本会记录解析后的路径、SHA-256、policy hash、observation dimension、
+normalizer 来源和有序 scenario IDs/seeds。release gate 在 `environment.step` 之前只读取当前
+Actor 可见 EKF 估计、场景 goal 与静态地图，并复用既有 SoftFusion pass-progress、clearance、
+recovery-buffer 常量；不读取 Teacher 状态或动作。
+
+## 2026-09-16：near-goal stable failure 离线诊断
+
+新增 `src/experiments/single_uav_near_goal_stable_failure_diagnostic.py`，只读取已完成的
+Goal Recovery Correction formal paired evaluation 中 correction ON 的 episode/step 日志，不加载
+checkpoint、不创建环境、不执行 rollout、Teacher 或训练，也不修改原始 formal 输出。脚本按 CSV
+字段签名定位 ON 日志，只选择 `entered_1m=1 && stable_goal=0`，并围绕首次进入 1 m 的 step 默认
+截取前 15、后 20 步。
+
+正式 `stable_goal` 判据来自 `src/simulation/environment.py`：估计目标距离不超过 1.0 m、simulator
+actual speed 不超过 0.5 m/s，并连续保持 5 步。现有 formal step log 没有保存 post-step actual speed、
+`single_uav_goal_speed_ok` 或稳定保持计数，因此工具不会声称精确重算判据；它把
+`goal_distance_after_m[t]` 与同 episode 连续下一行 `t+1` 的估计径向/切向速度对齐，明确标记为
+derived proxy。分类规则版本为 `near_goal_failure_rules_v1`，非互斥报告 `HIGH_ENTRY_SPEED`、
+`CORRECTION_OVERSHOOT`、`TANGENTIAL_RESIDUAL`、`ACTOR_CORRECTION_CONFLICT`、
+`INSUFFICIENT_BRAKING`、`GOAL_REGION_OSCILLATION` 和 `STABLE_HOLD_INTERRUPTED`；每类均保存阈值、
+可评估性、缺失字段、替代来源与证据 step，primary label 仅按固定优先级汇总。
+
+运行示例：
+
+```text
+python src/experiments/single_uav_near_goal_stable_failure_diagnostic.py \
+  --evaluation-root logs/preliminary/single_uav_goal_recovery_correction_eval_formal20_seed2026 \
+  --pre-steps 15 --post-steps 20
+```
+
+可用 `--no-plots` 跳过可选图片，`--quiet` 关闭逐 episode 输出。CSV/JSON 写入新的
+`logs/diagnostics/single_uav_near_goal_stable_failure_seed2026/`；图片默认写入对应 `plots/diagnostics/`
+目录。任一目标目录已存在时拒绝覆盖。
+
+## 2026-09-16：真实 stable 判据日志与 frozen ON-only 验证入口
+
+`single_uav_goal_recovery_correction_evaluation.py` 新增 `--actual-stable-validation` 专用模式，供后续
+在 PyCharm 手动运行同一 frozen BC Actor、同一 formal20 场景和 correction ON。该模式强制
+`formal=True`、`condition=on`，拒绝 OFF、paired 和 smoke 参数，并使用独立的新 data/logs/plots
+根目录；目标根已存在时仍会拒绝覆盖。
+
+运行前会只读核对上一轮 paired formal 的 `evaluation_summary.json`：checkpoint 绝对路径、文件
+SHA-256、policy hash、scenario manifest hash，以及 20 个 episode 的 ID、scenario/noise seed、
+scenario hash 和顺序必须完全一致。任何不一致都会在创建输出目录及 episode rollout 前失败。
+
+step 日志直接复制 environment 同一次 stable 判定放入 `next_info` 的 canonical 字段：post-step
+simulator actual speed、stable 使用的 estimated goal distance、distance/speed threshold、distance/speed
+布尔条件、candidate、`_single_uav_stable_steps` counter 和 stable flag。它们不是 estimated-speed
+proxy，也不在 evaluator 中重新计算 stable 判据。成功达到 hold threshold 的终止 transition 会先写入
+step row，再结束 episode。未来手动运行参数为：
+
+```text
+--actual-stable-validation
+```
+
+默认新输出根为：
+
+```text
+data/synthetic/single_uav_goal_recovery_actual_stable_validation_seed2026/
+logs/preliminary/single_uav_goal_recovery_actual_stable_validation_seed2026/
+plots/preliminary/single_uav_goal_recovery_actual_stable_validation_seed2026/
+```
+
+本阶段只完成日志、身份锁定、CLI 和纯 helper/mock 测试；Codex 未执行 smoke、formal 或任何 UAV
+rollout。
+## Near-goal Terminal Capture v1（代码准备，未执行实验）
+
+Goal Recovery Correction 现已支持默认关闭的近目标捕获子模式。它只在原 correction 已满足 post-bypass/released eligibility 且估计目标距离不大于配置半径时激活；默认半径为 `8.0 m`。该模式以现有 braking-distance desired speed 为上限，在接近 `1.0 m` stable 边界时平滑降至径向 floor `0.25 m/s`，并把径向 correction 分成推进与制动：只对推进分量做距离 fade，径向制动和切向阻尼不会随推进 fade 一起削弱。切向增益由原 `0.7` 平滑过渡到默认 `1.0`，合成 correction 仍使用原 `0.6 m/s` norm budget，之后仍经过原 action transform、safety projection、boundary projection 和环境动力学。
+
+专用入口为 `src/experiments/single_uav_goal_recovery_correction_evaluation.py --terminal-capture-validation`。它固定使用 Goal Recovery Correction ON、formal20、原 checkpoint 和原 ordered scenario identity，并引用 `logs/preliminary/single_uav_goal_recovery_actual_stable_validation_seed2026/evaluation_summary.json` 作为只读 baseline。默认输出分别写入 `data/synthetic/single_uav_terminal_capture_validation_seed2026`、`logs/preliminary/single_uav_terminal_capture_validation_seed2026` 和 `plots/preliminary/single_uav_terminal_capture_validation_seed2026`；任一目录已存在时拒绝覆盖。可用 `--terminal-capture-radius`、`--terminal-radial-speed-floor`、`--terminal-radial-brake-gain`、`--terminal-tangential-gain` 定义候选 treatment，非默认参数会在 summary 中标为 non-canonical 并进入 candidate config hash。
+
+本阶段只完成控制代码、日志、summary、CLI 与 pure/mock/AST 测试准备；未执行 `--terminal-capture-validation`、smoke、formal、任何 episode、`environment.step()` 闭环、Teacher rollout、PPO/MAPPO、BC 或 DAgger。
+
+### Single-UAV Terminal Capture v2（2026-09-17，待人工冻结评估）
+
+在现有 `GoalRecoveryCorrection` 内新增了默认关闭的 speed-dependent stopping governor 与 goal-boundary anti-stall。v2 使用 EKF 估计距离/径向速度，固定初始经验参数 `a_eff=1.697726 m/s²`（75 个 saturated-clean braking steps、11 个独立 episode 的 per-episode median p10，并由 actual-speed 交叉检查）和 `stopping_margin=1.328009 m`；速度包络为 `sqrt(0.25² + 2*a_eff*max(distance-1.0-margin, 0))`，且只会降低原 base desired radial speed。进入 1 m 后 desired radial speed 切换为 0；在 1 m 外且 radial error 为正时保留正常 radial propulsion authority，避免 v1 fade 导致边界外失速。8 m 半径仅保留给 v1 兼容、terminal gain blend 与分析日志，不再门控 v2 governor。
+
+未来人工入口为 `src/experiments/single_uav_goal_recovery_correction_evaluation.py --terminal-capture-v2-validation`。该入口锁定 correction ON、Terminal Capture ON、v2 ON、formal20，并以 `logs/preliminary/single_uav_terminal_capture_validation_seed2026/terminal_capture_validation_summary.json` 对应的 v1 formal20 结果作为 checkpoint、policy、scenario manifest 和 ordered episode identity 的唯一基线。新结果写入独立的 `single_uav_terminal_capture_v2_validation_seed2026` data/log/plot roots，已存在即拒绝覆盖；日志目录包含 `terminal_capture_v2_validation_summary.json`、`terminal_capture_v2_validation_episodes.csv`、`steps.csv` 和 `episodes.csv`。本次只完成代码与纯单元测试准备，尚未执行该入口、smoke、formal 或任何 rollout。
+
+### Terminal Capture v2 Extended-Horizon Diagnostic（2026-09-17，待人工执行）
+
+新增独立入口 `--terminal-capture-v2-horizon-diagnostic`，用于将已经完成的 v2 formal20 原样复现，只把单 episode horizon 从 `max_steps=100` 扩展到 `120`。入口以 `logs/preliminary/single_uav_terminal_capture_v2_validation_seed2026` 为冻结基线，逐项校验 checkpoint 路径与 SHA-256、policy hash、20 个 ordered episode/scenario identity、controller config、stable criterion 以及除 horizon 外的完整 runtime config；8 m、a_eff、stopping margin、terminal tangential gain、0.6 correction cap 和全部 v2 控制公式均不变。
+
+诊断输出写入独立的 `single_uav_terminal_capture_v2_horizon120_diagnostic_seed2026` data/log/plot roots，已存在即拒绝覆盖。日志至少包含 `terminal_capture_v2_horizon120_summary.json`、`terminal_capture_v2_horizon120_episodes.csv`、`steps.csv`、`episodes.csv`，并额外生成 recovery episode 对照表。step100/110/120 snapshot 分别表示执行第 100/110/120 步后的状态，即零基日志索引 99/109/119；extension window 从索引 100 开始。本阶段仅实现入口、身份审计和日志，没有执行该诊断或任何 UAV rollout，也不预判延长 horizon 是否足以完成 stable goal。
+
+### Terminal Capture v2.1 Near-Goal Radial Conflict Arbitration（2026-09-17，待人工验证）
+
+Stage 0 只读审计使用既有 horizon120 `steps.csv`，筛选 passed obstacle、post-bypass recovery、v2 anti-stall、距离大于 1 m 且 radial error 为正的样本。480 个样本中 Actor 径向反向 441 个（91.875%）；step≥100 的 140 个样本中为 132 个（94.286%）。六个仍未进入 1 m 的重点 episode 在 extension window 共 119 个样本，其中 118 个反向；平均 Actor radial 为 `-0.130714 m/s`，平均 inward correction 为 `+0.133947 m/s`，平均 pre-transform net radial 仅 `+0.003233 m/s`。该证据满足“重复出现 Actor–correction 径向抵消”的实现 gate，但不构成 v2.1 有效性的实验结论。
+
+v2.1 新增默认关闭的 `terminal_radial_conflict_arbitration_enabled`，第一版 gain 固定为 `1.0`。仅当 v2、v2.1、既有 correction eligibility/post-bypass/release/state gate、anti-stall、距离大于 stable threshold、positive radial error 全部成立且 raw pre-transform Actor radial 小于零时，使用既有 `motion.goal_direction` 计算 `gain × max(0, -actor_radial) × goal_direction`。补偿作为 external Goal Recovery correction 的一部分，在既有 combined correction `0.6 m/s` norm cap 之前加入；之后仍按原有 cap、alpha、Actor fusion、action transform、safety、boundary、dynamics 顺序执行。Actor raw action 从不重写，Actor tangential action和 v2 braking/governor 均不修改；v2.1 OFF 或任一 gate 不满足时保持原 v2 arithmetic exact-equivalent。
+
+未来人工入口为 `src/experiments/single_uav_goal_recovery_correction_evaluation.py --terminal-capture-v21-validation`。该入口锁定 correction/Terminal Capture/v2/v2.1 ON、formal20、`max_steps=100`，并以已完成的 v2 formal100 为冻结 checkpoint、policy、scenario 和 ordered episode identity 基线；允许的唯一行为配置差异是 arbitration enable 从 false 变为 true，gain 仍为 1.0。输出写入独立 `single_uav_terminal_capture_v21_validation_seed2026` data/log/plot roots，包含 `terminal_capture_v21_validation_summary.json`、`terminal_capture_v21_validation_episodes.csv`、`steps.csv` 和 `episodes.csv`，已存在即拒绝覆盖。本阶段只完成离线审计、代码和纯单元测试，不执行 v2.1 formal、smoke 或任何 UAV rollout。
+
+## 2026-09-17：Terminal Capture v1 有效制动能力离线审计
+
+`src/experiments/single_uav_terminal_braking_authority_audit.py` 只读取已经存在的 Terminal Capture v1
+formal20 CSV/JSON，不导入或调用 simulator、controller、Actor、Teacher 或训练代码。它按 episode 保留重复
+测量结构，恢复 braking sample 的 goal radial direction，并分别审计 raw request、0.6 correction cap、
+Actor fusion、action transform 和最终 dynamics-applied velocity increment。默认命令为：
+
+```text
+python src/experiments/single_uav_terminal_braking_authority_audit.py
+```
+
+默认输入为 `logs/preliminary/single_uav_terminal_capture_validation_seed2026/`，输出写入全新的
+`logs/preliminary/single_uav_terminal_braking_authority_audit_final_seed2026/`。输出目录已存在时拒绝覆盖；脚本
+生成 `braking_authority_summary.json`、`braking_authority_steps.csv`、
+`braking_authority_episodes.csv` 和 `braking_authority_report.md`。该入口只做离线日志分析，不执行
+`environment.step()`、任何 episode、smoke/formal rollout、训练或控制参数修改。
+
+## 2026-09-17：Terminal Capture v2.1 目标边界抖动离线审计
+
+新增 `src/experiments/single_uav_terminal_v21_boundary_chattering_audit.py`，只读取已经完成的 v2.1
+formal100 的 `steps.csv`、两个 episode 汇总 CSV 和验证 summary；它不导入在线控制、仿真、策略或训练
+模块，也不执行 `environment.step()` 或任何新 rollout。脚本逐步重建 canonical stable 判据（估计目标距离
+不超过 1.0 m、simulator actual speed 不超过 0.5 m/s，连续 5 步），并在生成结果前要求重建 counter
+与日志逐行一致。
+
+审计将 counter reset 区分为 distance-only、speed-only、both 和 unexplained，按首次进入 1 m 后的原始
+轨迹识别双向 crossing 与连续的 `distance > 1 m` outward excursion。enter-radius screen 使用
+`1.00/0.98/0.96/0.94/0.92/0.90/0.88/0.85 m`：从首次达到候选半径的当行开始（inclusive），检查后续
+是否存在连续 5 行原始 canonical candidate；这 5 行不要求继续处于候选 enter radius 内。release-radius
+screen 固定使用原始 1 m excursion 分段，仅当 excursion peak 严格大于候选 release radius 时计为触发，
+不会为每个候选半径重新分段。两种 screen 都只是既有轨迹上的观察性描述，不能解释为改变控制切换后的
+反事实 rollout。
+
+默认命令为：
+
+```text
+python src/experiments/single_uav_terminal_v21_boundary_chattering_audit.py
+```
+
+结果写入全新的
+`logs/preliminary/single_uav_terminal_v21_boundary_chattering_audit_seed2026/`，包含 JSON summary、episode、
+crossing、excursion、radius screen CSV 和 Markdown 报告；目标目录已存在时拒绝覆盖。报告明确区分未来
+controller mode 的 enter/release switching boundary 与保持不变的 1.0 m evaluation stable boundary。
+当前日志没有独立 actual goal distance，因此 estimated-vs-actual distance noise 归因固定报告为
+`NOT_ASSESSABLE`，不据此猜测噪声机制。本阶段不修改 v2.1 或其他控制逻辑，也不执行 smoke、formal、
+训练或 UAV rollout。
+
+本次冻结日志审计已完成：20 个 episode、1968 个 step 的 canonical stable counter 逐行重建完全一致。
+entered 的 S/F 组共有 10 次 reset，全部为 distance-only；首次进入 1 m 之后记录到 10 次
+inside→outside 和 9 次 outside→inside recrossing。四个 F episode 中，0015 仅归类为
+`DISTANCE_CHATTER`，0003/0016/0019 同时具有与随后出界直接关联的 hold-latched inward-region
+连续负径向速度证据，归类为 `MIXED`。固定网格给出的下一阶段候选是 enter 半开区间
+`[0.98, 1.00) m`（区间内部值尚未逐点扫描）和 release `1.05–1.08 m`；这只是下一轮实验设计范围，
+不是参数冻结或有效性结论。最终离线 verdict 为 `AUDIT_READY_FOR_V22`，但 hysteresis 单独使用不被
+当前证据判为充分，restorative inward hold 仅标记为值得后续受控实验检验。
+
+## 2026-09-18：Terminal Capture v2.2 Hold Latch（代码准备，未执行实验）
+
+在既有 Goal Recovery Correction 内加入默认关闭的 `terminal_capture_v22_enabled`。v2.2 仅在
+Terminal v2、v2.1 arbitration、post-bypass/release gate 均有效时使用 episode-local hold latch：
+估计距离不大于 `0.98 m` 时进入，锁存后在 canonical `1.0 m` 内以零径向目标继续制动；漂移到
+`(1.0, 1.05) m` 时复用原 `0.25 m/s` radial floor，按
+`0.25 * clip((distance - 1.0) / (1.05 - 1.0), 0, 1)` 生成小幅向内恢复目标；达到
+`1.05 m` 时释放并在同一调用恢复原 v2/v2.1 capture。restorative radial error 继续走原 v2.1
+Actor 径向冲突仲裁与既有 `0.6 m/s` correction cap，之后的 action transform、safety、boundary、
+dynamics 均未改变。每次 episode 开始显式 reset latch，v2.2 OFF 保持 v2.1 输出兼容。
+
+未来人工验证的 PyCharm 配置如下（本次没有运行）：
+
+```text
+Script path: D:\research project\src\experiments\single_uav_goal_recovery_correction_evaluation.py
+Working directory: D:\research project
+Parameters: --terminal-capture-v22-validation
+```
+
+该入口锁定 correction/Terminal Capture/v2/v2.1/v2.2 ON、formal20、`max_steps=100`、enter
+`0.98 m`、release `1.05 m`、restorative ON，并以已完成的 v2.1 formal100 为只读身份基线。
+本阶段仅完成控制逻辑、日志、summary、CLI、pure/helper/mock 测试与静态检查；没有执行 validation、
+formal、smoke、`environment.step()`、任何 UAV rollout 或训练。
+
+## 2026-09-18：Terminal Capture v2.3 Target-Radius Guard（代码准备，未执行实验）
+
+Stage 0 已修复 v2.2 evaluation aggregate 中“每 episode 最大值的均值被命名为全局最大值”的
+schema 错误；新字段明确区分 global maximum 与 mean episode maximum，未重新运行 v2.2 formal。
+Stage 1 随后只读扫描既有 v2.2 formal100 的 20 个 episode、1,968 个 step：9 个 distance-only
+counter reset 中有 8 个存在 1–2 步 outward precursor。固定候选扫描结果为：`0.94 m` 覆盖 8/9
+但成功 episode 介入率为 58.82%，`0.95 m` 覆盖 7/9、介入率 47.06%，`0.96 m` 覆盖 7/9、
+介入率 35.29%，`0.97 m` 只覆盖 6/9。按“覆盖至少 7/9 后选择介入更少的最大 target”规则，
+离线 verdict 为 `AUDIT_READY_FOR_V23`，选择 `0.96 m`。该扫描只是冻结轨迹上的 counterfactual
+command 计算，不代表改变 controller 后的因果轨迹预测。审计产物位于
+`logs/preliminary/single_uav_terminal_capture_v23_preboundary_audit_seed2026/`。
+
+在 v2.2 episode-local hold latch 之上新增默认关闭的
+`terminal_capture_v23_enabled`。完整 v2/v2.1/v2.2/v2.3 gate 打开且 latch 保持时，
+以冻结目标半径 `0.96 m` 和 release 半径 `1.05 m` 使用统一向内目标
+`0.25 * clip((distance - 0.96) / (1.05 - 0.96), 0, 1) m/s`；目标半径以内为零，
+`0.96–1.0 m` 记录为 pre-boundary，`1.0–1.05 m` 记录为 post-boundary restore。
+达到 `1.05 m` 时仍由 v2.2 同调用 release/capture 逻辑处理。v2.3 复用 v2.1
+径向冲突仲裁和既有 correction cap，不修改 Actor、action transform、reward、dynamics、
+obstacle 或 stable criterion；v2.3 OFF 保持 v2.2 算术路径不变。
+
+未来人工验证入口（本次没有运行）：
+
+```text
+Script path: D:\research project\src\experiments\single_uav_goal_recovery_correction_evaluation.py
+Working directory: D:\research project
+Parameters: --terminal-capture-v23-validation
+```
+
+该入口锁定 correction/Terminal Capture/v2/v2.1/v2.2/v2.3 ON、formal20、`max_steps=100`、
+target `0.96 m`，并以 v2.2 formal100 的 checkpoint、policy、manifest、ordered episode
+artifacts 为只读基线；输出使用新的 v2.3 validation roots 和
+`terminal_capture_v23_validation_summary.json` / `terminal_capture_v23_validation_episodes.csv`。
+本阶段仅完成控制逻辑、日志、summary、CLI、pure/helper/mock 测试与静态检查；没有执行 validation、
+formal、smoke、`environment.step()`、任何 UAV rollout 或训练。
+
+## 2026-09-18：Terminal Capture v2.3 Pre-Boundary Radial Authority Repair（代码准备，未执行实验）
+
+Stage 0 对既有 v2.3 formal100 日志进行了只读复核：20 个 pre-boundary active step 中有 11 个
+`terminal_v23_radial_error_mps > 1e-9`，这 11 个 step 的 radial propulsion norm 全部
+`<= 1e-9 m/s`，非零计数为 0，因此确认实现缺陷。根因是 v2.3 在 `0.96–1.0 m` 内给出了正的
+径向跟踪误差，但沿用了 v1 的近目标 propulsion fade；该 fade 在这一距离带为零，而 v2 anti-stall
+只会在 canonical `1.0 m` 边界之外恢复 authority。
+
+修复仍复用原 radial propulsion 分支、原 radial gain 和原 goal direction。只有在 v2.3 明确启用、
+hold latch 已锁存、v2.3 guard 与 pre-boundary 同时有效且 radial error 严格大于 `1e-9` 时，
+才把现有 propulsion scale 恢复为完整 authority；其他路径继续使用原 v1 fade。没有新增第二套控制器，
+也没有修改 braking/propulsion 互斥、`<=0.96 m` 零目标、v2.1 仲裁、`0.6 m/s` correction cap、
+action transform、reward、dynamics 或 stable criterion。新增的 authority 日志字段只读取已计算结果，
+用于区分 requested/executed radial propulsion、允许/抑制状态、原因以及 v2.1 前后的净径向跟踪量。
+
+为后续人工复验准备了独立入口（本次严禁且未执行）：
+
+```text
+Script path: D:\research project\src\experiments\single_uav_goal_recovery_correction_evaluation.py
+Working directory: D:\research project
+Parameters: --terminal-capture-v23-authority-repair-validation
+```
+
+入口锁定既有 v2.3 formal20/max100 的 checkpoint、policy、scenario manifest、ordered episode、
+controller 参数、action transform 与 stable criterion，并写入独立的
+`single_uav_terminal_capture_v23_authority_repair_validation_seed2026` data/log/plot roots；结果文件名为
+`terminal_capture_v23_authority_repair_validation_summary.json` 和
+`terminal_capture_v23_authority_repair_validation_episodes.csv`。当前状态为 prepared-only；本次只进行
+静态编译、pure/helper 单元测试、差异检查和旧日志哈希复核，没有运行该入口、smoke、formal、
+`environment.step()`、任何 UAV rollout 或训练。
+
+## 2026-09-18：Single-UAV Near-Goal Capture Latency Offline Audit（已完成）
+
+新增只读审计入口 `src/experiments/single_uav_near_goal_capture_latency_audit.py`。它只读取冻结的
+authority-repaired v2.3 formal100 `steps.csv`、episode CSV 和 summary JSON，距离进展统一使用
+`goal_distance_after_m` 的 post-step 序列，实际速度使用 `post_step_actual_*`；不导入 controller、
+simulator、policy、training 或 environment，也不调用 rollout、`environment.step()`、smoke 或 formal。
+
+审计锁定 20 个 episode、1,955 个 step，检查 episode/scenario/noise identity、连续 step、重复行、
+NaN 分布、checkpoint/policy/manifest/config hash 与 frozen source 一致性。目标失败 episode 为
+`test_r99_episode_0001`、`test_r99_episode_0008`、`test_r99_episode_0017`：三者均在 100 步内未
+进入 1 m，但未观察到 late safety/boundary projection。逐 episode 诊断为：0001 为
+`MIXED + HORIZON_LIMITED_APPROACH + BRAKING_PROPULSION_OSCILLATION`，0008 为
+`HORIZON_LIMITED_APPROACH`，0017 为 `MIXED + HORIZON_LIMITED_APPROACH + ACTOR_RADIAL_CONFLICT`。
+这些是冻结轨迹上的探索性证据，不是反事实因果结论；没有证据要求重新打开 Terminal Hold v2.3。
+
+规范输出位于 `logs/preliminary/single_uav_near_goal_capture_latency_audit_seed2026/`，包括 summary、
+episode diagnostics、late-window steps、reference comparison、phase timeline 和
+`near_goal_capture_latency_report.md`。报告状态为 `CAPTURE_LATENCY_AUDIT_READY`；唯一建议的后续
+实验是另行授权后仅将 `max_steps=100→120` 的 horizon-only diagnostic，本轮未执行，也未修改任何
+controller、Actor、governor、action transform、hold、source logs 或训练/rollout 状态。新增纯离线
+审计测试 4 项全部通过。
+
+## 2026-09-18：Single-UAV Near-Goal Capture Horizon-Only Diagnostic（准备完成，未执行）
+
+HORIZON120_DIAGNOSTIC_READY
+
+已新增独立的 `--terminal-capture-v23-authority-repair-horizon120-diagnostic` 入口，严格固定
+`formal=true`、`condition=on`、20 个 canonical static-holdout episode，并只把
+`max_steps=100` 改为 `120`。入口不会复用或覆盖
+`--terminal-capture-v23-authority-repair-validation`；data/log/plot 根分别为：
+
+```text
+data/synthetic/single_uav_near_goal_capture_horizon120_diagnostic_seed2026/
+logs/preliminary/single_uav_near_goal_capture_horizon120_diagnostic_seed2026/
+plots/preliminary/single_uav_near_goal_capture_horizon120_diagnostic_seed2026/
+```
+
+候选运行前会读取并严格校验只读基线
+`logs/preliminary/single_uav_terminal_capture_v23_authority_repair_validation_seed2026/`，
+包括 baseline summary SHA-256 `4048b73c42423d56eb95f006d8177b205752b4d5d4580c28d65d699e551ef2e2`、checkpoint SHA-256
+`b7ed3ba79cf3055906bd0425cf4a7c4e613b206a8680ebf17f3b586fbc31b3c6`、policy hash
+`c423ad25f7832ad74fc1782ac56aabfaeacb2f004e217cb5a02b225cd04a78b5`、manifest hash
+`becf1bba9fb868787356889f3825c71645788ff766e6ead1506886ec0fbf2114` 和 ordered episode
+identity。fail-fast identity lock 覆盖 checkpoint、policy、observation、scenario/order、reward、
+dynamics、obstacle/safety/boundary、action transform、stable criterion、max correction、
+`a_eff`、stopping margin、v2 governor、v2.1 arbitration、v2.2 parameters、v2.3 parameters、
+authority-repair behavior 与 controller config；最终要求 `only_horizon_changed=true`。
+
+后处理明确以零基索引 `0–99` 为 first100、`100–119` 为 extension（自然语言 step 101–120），
+并输出 `entered1_*`/`stable_*` 六类分类、step100/110/120 snapshots、扩展区距离减少、径向/切向
+速度、Actor opposing fraction、v2.1 conflict fraction、propulsion/braking switch，以及 collision、
+safety projection、boundary projection、action clipping、terminal saturation 的 first100/extension-only
+计数。恢复对照表和 focus 表保留 `test_r99_episode_0001`、`0008`、`0017`。
+
+本轮只修改 evaluation harness、README 和纯/mock 测试；`src/control/goal_recovery_correction.py`、
+v2/v2.1/v2.2/v2.3 arithmetic、authority repair、Actor/GAT/Critic、reward、dynamics、action
+transform、stable criterion、source logs 均未修改。训练、formal/smoke、environment.step、rollout 和
+新 UAV trajectory 均未执行；新输出根也未创建。待用户人工运行该入口后再读取结果，本轮在准备完成处停止。
+
+准备状态的单独报告见 `sections/single_uav_near_goal_capture_horizon120_diagnostic_preparation.md`。
+
+## 2026-09-18：Single-UAV Upstream Obstacle-Bypass Failure Offline Audit（已完成）
+
+UPSTREAM_BYPASS_AUDIT_READY
+
+本阶段对既有 horizon120 authority-repaired v2.3 日志执行了只读离线审计，输入固定为
+`logs/preliminary/single_uav_near_goal_capture_horizon120_diagnostic_seed2026/`，共 20 个 episode、
+2,182 个 step。身份门控确认目标失败为 `0002/0004/0005/0006/0011/0012/0013/0014/0020`，成功参考为
+`0001/0003/0007/0008/0009/0010/0015/0016/0017/0018/0019`；两组的
+`passed_obstacle`/`post_bypass_recovery` 标签与请求完全一致，`only_horizon_changed=true`，源文件审计前后
+SHA-256 未变化。
+
+审计只读取 CSV/JSON，不导入 simulator、environment、controller、policy 或 training runtime，不调用
+`environment.step()`，没有 rollout、训练、formal、smoke，也没有修改任何源日志或控制器。正径向定义为
+朝向 goal，切向字段是速度大小而非带符号分量；日志缺少 UAV/障碍横向几何与坐标手性，因此报告
+`OBSTACLE_GEOMETRY_PARTIALLY_OBSERVABLE`，左右绕行方向保持 `NOT_IDENTIFIABLE`。
+
+现有日志的安全投影共 5 步（0013=4、0014=1），边界投影共 41 步（0013=7、0014=34），动作裁剪与两者
+分开统计。九个失败的 Goal Recovery active steps 均为 0，符合 `activation_mode=post_bypass_only`，因此
+terminal Goal Recovery 不是这些 upstream failures 的直接来源。冻结轨迹上的主诊断簇为：6 个
+`EXCESSIVE_LATERAL_PERSISTENCE`、1 个 `RADIAL_PROGRESS_COLLAPSE`、1 个
+`SAFETY_LAYER_DOMINATED`、1 个 `BOUNDARY_DRIFT_AFTER_AVOIDANCE`；这些是证据标签，不是反事实因果结论。
+
+规范产物位于 `logs/preliminary/single_uav_upstream_obstacle_bypass_failure_audit_seed2026/`，包括机器可读
+summary、episode diagnostics、phase timeline、obstacle-window steps、success-IQR comparison、projection
+breakdown 以及 `upstream_bypass_report.md`。本阶段在报告生成后停止，不启动下一项实验。
+
+## 2026-09-18：Single-UAV Signed Bypass Observability Diagnostic（准备完成，未执行）
+
+SIGNED_BYPASS_OBSERVABILITY_READY
+
+已完成 Stage 0 静态审计并加入有符号绕障观测旁路。底层动作/状态/障碍 contract 仍是 3D，
+但冻结 static holdout 的 start、goal、obstacle center 均位于 `z=20` 水平面；因此采用
+`goal_projected_xy_left` 冻结横向轴（正号为 goal-frame-left，负号为 goal-frame-right），并单独记录
+ENU vertical 分量。XY 退化时严格输出 `SIGNED_LATERAL_AXIS_NOT_WELL_DEFINED`。
+
+新增独立纯 helper、可选 CLI flag
+`--single-uav-signed-bypass-observability-diagnostic`、轨迹 fingerprint fail-fast
+`LOGGING_PERTURBED_TRAJECTORY` 与独立输出根：
+
+```text
+logs/preliminary/single_uav_signed_bypass_observability_diagnostic_seed2026/
+```
+
+未来运行会生成 `signed_bypass_summary.json`、`signed_bypass_episodes.csv`、
+`signed_bypass_steps.csv`、`signed_bypass_focus_failures.csv` 和
+`signed_bypass_direction_transitions.csv`。旁路只读取既有 estimated/actual state、tracker obstacle
+geometry 和动作流水线，不进入 observation、reward、controller、RNG 或 reset；不调用 Teacher/Oracle。
+
+当前 baseline horizon120 summary/current evaluation config 没有独立持久化的 reward、dynamics、
+action-transform、safety-projection 或 boundary-projection identity digest；五项 identity 因此均 fail-closed
+为 `NOT_INDEPENDENTLY_VERIFIED`，原有 `same_*` 聚合检查只作为 supporting context。step-level trajectory
+fingerprint 仍提供行为等价保护，并保留 `LOGGING_PERTURBED_TRAJECTORY` fail-fast。
+
+本次只完成静态编译与 51 项纯离线测试，未运行该 CLI、environment.step、rollout、formal、smoke 或训练，
+未修改历史日志、Actor/GAT/Critic、Goal Recovery、reward/dynamics、safety/boundary、action transform。
+准备报告见 `sections/single_uav_signed_bypass_observability_diagnostic_preparation.md`，等待人工运行。
+
+## 2026-09-18：Single-UAV Encounter-Relative Lateral Exit Authority Offline Audit（已完成）
+
+LATERAL_EXIT_AUTHORITY_AUDIT_READY
+
+本轮只读取既有 `single_uav_signed_bypass_observability_diagnostic_seed2026` 的五个冻结
+CSV/JSON artifact，对 20 个 episode、2,182 个 step 做 encounter-relative 离线审计。身份门确认
+`only_logging_changed=true`、`logging_perturbed_trajectory=false`，checkpoint、policy、observation、
+ordered episode、scenario manifest、max steps 与 frozen controller identity 全部匹配；审计前后五个
+源文件 SHA-256 完全一致。
+
+审计固定使用 `step >= signed_encounter_step`，5 步窗口至少 4 步反向 command 定义 sustained
+counter-steer，连续 3 步 clearance increase 与连续 3 个 actual lateral speed 下降 transition；near-zero
+阈值直接复用现有 `stable_speed_threshold_mps=0.5`。原 whole-episode
+`LATERAL_SIGN_OSCILLATION` 不参与 primary diagnosis。11 个成功 episode 使用相同规则建立 median/IQR
+参考，0013/0014 作为 safety/boundary 特殊案例排除于主 cluster。
+
+七个主要 failure 均出现 sustained counter-steer，因而不支持统一解释为“Actor 不知道何时停止横移”。
+0002、0004、0020 为 `LATERAL_MOMENTUM_DECAY_TOO_SLOW`；0005、0011、0012 为
+`COUNTERSTEER_NOT_SUSTAINED`；0006 为两者混合。七个主案例的 Actor→final retention 均为 1.0，
+没有 `PIPELINE_ATTENUATION` 或 `COUNTERSTEER_TOO_WEAK` 主案例。主要 failure 的 extra drift median
+为 2.416 m，而成功参考为 0 m；steps-to-near-zero median 为 14，而成功参考为 0。当前没有证据要求
+先修改 safety、boundary 或 Terminal controller。唯一建议的下一步是冻结 Actor/场景/其余 controller，
+只准备 encounter 后 minimal lateral-exit braking assistance OFF/ON 配对因果诊断；本轮未实现或运行。
+
+派生产物位于：
+
+```text
+logs/preliminary/single_uav_lateral_exit_authority_audit_seed2026/
+```
+
+其中包含 summary JSON、episode diagnostics、counter-steer windows、成功参考、failure-vs-reference
+CSV 与 `lateral_exit_report.md`。新增审计脚本不导入 simulator/environment/controller/policy/training
+runtime；31 项纯 unit tests 通过。未执行 environment.step、rollout、formal、smoke 或训练，也未修改
+Actor、Critic、GAT、reward、dynamics、action transform、safety、boundary、Goal Recovery 或 Terminal
+controller。
+
+## 2026-09-19：Single-UAV Minimal Lateral-Exit Braking Assistance OFF/ON（准备完成，未执行）
+
+LATERAL_EXIT_BRAKING_DIAGNOSTIC_VALIDITY_FIXED
+
+已准备独立的 paired causal diagnostic。OFF 保持 authority-repaired v2.3、`max_steps=120`、
+Goal Recovery ON 的 signed-observability 基线；ON 唯一增加固定 cap `0.075 m/s per step` 的
+deterministic lateral-exit damping，不决定 bypass side，也不使用 simulator actual state 控制。
+
+全部 gate 使用 pre-step EKF estimated state、goal、static map、raw Actor action 与 encounter-frozen
+lateral frame：valid encounter、estimated past closest approach、连续三个 clearance increase、5 步中至少
+4 步 sustained counter-steer、estimated lateral velocity 仍为原方向、Goal Recovery inactive。动作路径为互斥
+fusion：Goal Recovery active 时完整保留旧路径；仅在其 inactive 且 ON gates 全部通过时，对
+`raw Actor + assistance` 调用一次既有 transform，之后继续经过 safety、boundary、dynamics；共享 `0.6 m/s`
+cap 不变。
+
+encounter frame 明确使用 `goal - EKF estimated position` 的 XY 投影，随后调用既有 fail-closed horizontal
+frame helper；非零 estimated z 偏差不再误触发“goal ray is not horizontal”。若 XY 投影退化，则不使用
+actual state 或 scenario initial position 补救，而是记录 `horizontal_goal_frame_degenerate` 并令 assistance
+unavailable。signed helper 本身及其非水平 ray 拒绝契约保持不变。
+
+paired 入口先执行 OFF，并在任何 ON reset/artifact 前用版本化 step trace 与冻结 signed-observability
+artifact 精确比较；失败输出 `LATERAL_EXIT_OFF_BASELINE_MISMATCH`。Actor/Critic/GAT/normalizer 在条件边界
+做三点哈希，20 个 episode、seeds、顺序、checkpoint、policy、observation、controller config 与 horizon
+均由实际数据比较。reward、dynamics、action transform、safety 与 boundary 缺少独立 digest 时报告
+`NOT_INDEPENDENTLY_VERIFIED`，不参与字符串真值判断；`only_lateral_exit_braking_assistance_changed` 由
+paired identity、OFF fingerprint 与精确 treatment config diff 派生。
+
+endpoint 采用 all-20 ITT，并以 OFF 首个 eligible step 定义 secondary cohort 与共同 ON anchor。轨迹型
+secondary 统一截取到 `min(OFF last, ON last)`，新增 anchor-relative `0.5 m/s` threshold time 与明确右删失；
+system-level passed/recovery/stable/collision/timeout/projection endpoints 仍使用完整 episode。primary 最大侧移
+按既有实际计算语义改名为 initial-direction excursion，未改变计算。active preregistration hash 为
+`a93837621a04c9fa7895881155a90878b664eeac318fbcb0cf7dded5afedd2c2`；旧 hash 仅标记为 pre-run superseded。
+
+人工入口为：
+
+```text
+python -m src.experiments.single_uav_lateral_exit_braking_assistance --condition paired
+```
+
+未来独立日志根为
+`logs/preliminary/single_uav_lateral_exit_braking_assistance_diagnostic_seed2026/`，fresh-output 拒绝覆盖。
+本轮没有运行该 CLI、environment.step、rollout、formal、smoke、simulation 或训练，也没有创建新输出根。
+准备详情见 `sections/single_uav_lateral_exit_braking_assistance_preparation.md`。
+
+人工首次启动在 rollout 前发现 frozen runtime normalizer hash 无法直接序列化嵌套 `FeatureNormalizer`。
+现已将 normalizer identity 改为稳定、只读、递归 JSON snapshot：数组显式记录 dtype/shape/values，
+非有限浮点使用稳定标签，自引用对象 fail closed，callable 字段不进入 snapshot。该修复不调用或修改
+normalizer，不影响 normalization arithmetic；Actor/Critic/GAT/policy hash、assistance、endpoint、预注册与
+OFF baseline fingerprint 均保持不变。
+
+## 2026-09-19：Post-Lateral-Exit Reorientation 离线审计（已准备，未运行）
+
+已新增纯离线审计脚本与合成单元测试，固定使用 active preregistration、OFF 首个 eligible anchor、共同窗口及三步 `|actual lateral velocity| <= 0.5 m/s` local-exit 定义；审计同时检查 frame/action 投影、精确 pass gate、ON 成功参考 IQR 和主 failure 分类。输出固定为 `logs/preliminary/single_uav_post_lateral_exit_reorientation_audit_seed2026/` 下八个文件。唯一后续实验建议为冻结 Actor 与其余控制组件后的 paired post-local-exit/pre-pass radial-intent-persistence intervention。本轮未运行审计、测试或仿真。
+
+## 2026-09-20：Pre-pass Reorientation 成功参考校正（已准备，未运行）
+
+新增纯离线审计入口 `src/experiments/single_uav_prepass_reorientation_reference_audit.py` 与合成单元测试。审计复用冻结 OFF/ON 身份与 frame 投影校验，将 11 个固定 ON 成功回合的参考窗口截断在首次精确 pass gate，并对 7 个固定失败回合提供 whole/pre-best/post-best 分段；旧参考只用于证据变更对照。目标输出目录固定为 `logs/preliminary/single_uav_prepass_reorientation_reference_audit_seed2026/`，恰含六个文件。没有运行审计、测试、py_compile 或仿真，也没有实现任何干预。
+
+## 2026-09-20：Single-UAV Pre-pass Radial-Intent-Persistence Diagnostic（代码已准备，未执行）
+
+新增 radial-only assistance evaluator opt-in、离线 cap / OFF-baseline 准备模块与 unittest 覆盖。固定 all-20 paired ITT；两臂均保持 Goal Recovery、signed observability、lateral-exit assistance 开启，radial assistance 为唯一处理差异。机制 gate 使用冻结 encounter frame、estimated-only 连续 lateral exit 与 Actor 五步历史；cap 只从固定七个 prior-ON failure episode 派生，fail closed，不做 sweep。准备契约及命令见 `sections/single_uav_radial_intent_persistence_diagnostic_preparation.md`。
+
+本轮已经运行纯离线 `--prepare-only`，物化且校验了 7 个 canonical preparation artifacts。最终 consistency fix 把 cap derivation 的歧义 `fail_closed=false` 拆为 `fail_closed_policy=true` 与 `fail_closed_triggered=false`，并在 preparation summary、cap artifact、runtime lock、preregistration lock 中保持一致；preregistration policy 仍为 `fail_closed=true`。由于 canonical payload 锁定 diagnostic 源码 hash，旧 `5a2b175b...` 在任何 rollout 前被新 active preregistration hash `bf70fb95188ca73c1ba87997a090d22331a3ac76a27daaaea1d86da09f59e40b` 正式取代。OFF baseline fingerprint 仍为 `9d10d1529c4a0126899d72428c227a710cb00a2293205d32a113308e4819787f`，冻结 cap 仍为 `0.075 m/s`。`py_compile` 与 40 项纯 `unittest` 均通过；没有运行 OFF/ON diagnostic、formal、smoke、rollout、仿真、训练或 `environment.step()`。没有新增论文符号，也没有修改历史数据或控制器实现。
+
+## 2026-09-20：Single-UAV Pre-Pass Handoff / Pass-Progress Regression 离线审计（已完成）
+
+PREPASS_HANDOFF_PASS_PROGRESS_AUDIT_READY
+
+本轮只读取最新 radial-intent paired run、active preregistration/runtime lock 与既有 pre-pass reference；审计前后所有输入 SHA-256 完全一致，OFF/ON 仍为 11/20 与 12/20。固定六个普通 main failures 均在 best margin 后出现 regression，best-row clearance 均已超过 2.5 m，限制项全部为 `MARGIN_LIMITED`；0002、0004、0006 的 assistance 分别晚于 best pass window 20、17、28 step，0005、0011、0020 虽较早介入，仍普遍出现 goal progress 与 pass geometry 方向不一致。0012 在 ON 中于 step 63 正式 pass，best margin 为 0.324 m，assist-active frame angle 平均仅 5.43°，作为独立 rescue control 保留。
+
+描述性 PASS_COMMIT 条件为 6/6 支持，达到预设至少 4/6 gate；唯一下一步建议为 `PREPARE_MINIMAL_PASS_COMMIT_CAUSAL_DIAGNOSTIC`，本轮未设计或实现控制律。0013 的 safety projection 从 OFF 4 step 增至 ON 9 step，其中 5 step 与 radial assistance 时间重叠，但仅报告关联；0014 两臂均有 34 个 boundary projection step，继续作为 boundary-dominated special case 排除主判断。
+
+八个产物位于 `logs/preliminary/single_uav_prepass_handoff_pass_progress_audit_seed2026/`。新增模块仅使用 Python 标准库读取冻结 CSV/JSON，52 项纯单元测试、`py_compile` 与 diff 检查通过；未运行 environment、rollout、formal、smoke、simulation 或训练，未修改任何 controller、Actor/Critic/GAT、reward、dynamics、action transform、safety、boundary、Goal Recovery、Terminal 或 pass gate。
+
+## 2026-09-20：Single-UAV PASS_COMMIT Diagnostic（原 attempt 已中止）
+
+新增 estimated-only pass-progress non-regression helper、Evaluator opt-in 与只读准备入口。固定 all-20 paired ITT；两臂均启用 lateral-exit braking、关闭 radial intent assistance，仅 ON 启用 PASS_COMMIT。离线 cap 只使用六个固定 prior-ON failure episode；逐源行输出纳入/排除原因，冻结规则为 Type-7 Q3 与 `0.075 m/s` 上限的较小者。OFF 基线采用独立 PASS_COMMIT fingerprint，在 ON 布局/reset 前进行严格 identity/trace 校验。准备契约与人工运行门控见 `sections/single_uav_pass_commit_diagnostic_preparation.md`。
+
+原 canonical preparation bundle 已物化，cap 为 0.075 m/s，父 active preregistration hash 为 `74b999edb1158fc960374025f418d33c7812a57653c07f6d0e73fab8b69e02ac`，OFF baseline fingerprint 为 `de53e383264db1c46ea793519f7b627f3ef83fbb447ca33d9d44cf72a603c97e`。之后人工 attempt 完成 OFF 20/20 并通过 OFF fingerprint、逐 episode trace/outcome 与 aggregate 检查；ON episode 0001 遇到 `ACTION_DECOMPOSITION_ASSERTION` 后中止，没有保存 ON step rows。该 attempt 保留在 `logs/preliminary/single_uav_pass_commit_diagnostic_seed2026/run/`，并标记为不计入正式结果。
+
+## 2026-09-20：PASS_COMMIT Action-Decomposition Residual 修复（bookkeeping only，等待新 paired run）
+
+Root cause 是 pre-transform reconstruction residual 漏加实际 applied/capped PASS_COMMIT vector。旧式分解为 `||Actor + GoalRecoveryApplied + LateralApplied + RadialApplied - combined_pre_transform||₂`，ON active action 实际已在 Actor 上加了 PASS_COMMIT applied vector，故这是结构性残差；tolerance 保持 `1e-9`。失败 ON step 没有持久化 row，精确 residual 数值不可恢复；纯 synthetic case 的 0.075 m/s applied vector 会使旧式 residual 为 0.075 m/s，修复后为 0。
+
+修复属于 `BOOKKEEPING_ONLY_FIX`：控制律、trigger、direction、cap、clearance gate 与实际 correction 均未改变。加入纯 action-decomposition helper、应用向量互斥检查和每步 transform call-count assertion；PASS_COMMIT OFF / ON inactive / ON active 的 pure tests 均验证 transform 恰好一次（raw Actor 原有 bypass 保持不变）。原 OFF contract 文件逐字节未变，重新核对失败 run 的 2185 step rows 与 20 episodes 均匹配目标 fingerprint `de53e383264db1c46ea793519f7b627f3ef83fbb447ca33d9d44cf72a603c97e`。
+
+修复版 preparation 位于 `logs/preliminary/single_uav_pass_commit_diagnostic_seed2026/preparation_action_decomposition_fix_v1/`。父 hash 为 `74b999edb1158fc960374025f418d33c7812a57653c07f6d0e73fab8b69e02ac`，新 active preregistration hash 为 `ddd08b7fc729c759b51eff091bfc25b6eb273aef2368e40dea4d57c317dee73a`；新运行将写到独立的 `run_action_decomposition_fix_v1/`。runtime-lock 与 OFF contract offline verification、69 项 targeted pure tests、`py_compile`、`git diff --check` 均通过。没有重新运行 OFF/ON 或任何环境步骤；下一 attempt 必须从完整 OFF 20 + ON 20 开始。
+
+## 2026-10-10：PASS_COMMIT 离线汇总闭合与独立单 UAV PPO 工程准备
+
+后续磁盘证据表明 `run_action_decomposition_fix_v1/` 已保存完整 OFF/ON 各 20 回合、2,185 行逐步记录。最终汇总缺失的代码缺陷是 evaluator 两次引用未绑定的 `ALL_EPISODE_IDS`；本次将该块替换为 `src/pass_commit_finalization.py` 中的纯汇总函数，并以冻结预注册总体显式提供 ID。没有找到原退出堆栈，因此没有把历史退出原因补写为已证实的同一异常。
+
+只读取原 CSV/JSON 完成了离线恢复，独立输出位于 `logs/preliminary/single_uav_pass_commit_diagnostic_seed2026/offline_recovery_action_decomposition_fix_v1_20261010/`，包含 `evaluation_summary.json`、`recovery_provenance.json`、`recovery_checks.csv` 和 `paired_summary.csv`。两臂均为 11/20 通过、10/20 稳定到达、0 碰撞，PASS_COMMIT active steps 为 OFF 0、ON 73；安全投影各 5 步、边界投影各 41 步。OFF fingerprint、锁定预注册、三点 Actor/Critic/GAT/normalizer 身份及输入前后哈希均通过核查。原轨迹、中止尝试、冻结文件和 ZIP 归档保留；修复后的代码哈希另行登记，旧 source lock 沿用历史含义。
+
+新增独立配置 `data/configs/single_uav_ppo_baseline_v1.json` 及实现 `src/experiments/single_uav_ppo_baseline.py`，从头初始化单 UAV PPO，五类辅助控制 PASS_COMMIT、lateral-exit、radial-intent、Goal Recovery、Terminal Capture 全部关闭。保留既有 `legacy` 基础实体安全投影及边界处理；额外目标制动 safety projection 关闭。固定决策周期 0.2 s、最大速度 12 m/s、最大加速度 3 m/s²、速度增量范数上限 0.6 m/s、安全距离 2 m、边界 `(0,0,2)..(200,200,60)` m、评估时域 120 步/24 s。
+
+严格成功使用动作后的真实任务位置与实际状态速度：全程无碰撞、已完成实体障碍通过、目标距离不超过 1 m、实际速度不超过 0.5 m/s，连续保持 5 个决策步。独立环境统一成功奖励、终止和日志；碰撞永久锁存，条件破坏时保持计数清零，回合 reset 清空全部状态。原环境与历史配置保留原行为。
+
+`ppo_action_logprob_mode="sampled"` 显式固定。默认新训练器的 reconciliation 路径自动写入采样动作、实际执行动作、采样 old log-probability、总修正与安全修正向量/范数，并区分动作限幅、速度限幅、安全投影和边界原因。未来真实执行日志默认写到 `logs/preliminary/single_uav_ppo_baseline_v1_seed2026/sampled_execution.csv`；构造时可以传入新的独立路径，已有日志拒绝覆盖。本阶段仅保存独立的预检动作行。
+
+Actor 节点特征为 42 维，估计速度、目标相对位置、机体系实体障碍相对方向的零基切片分别为 `3:6`、`30:33`、`39:42`。上游状态扰动在原始及归一化输入中均有效，实际 Actor encoder 收到完整的归一化 42 维特征。真实未训练策略的采样/执行修正检查确认 old log-probability 不变、PPO ratio=1、buffer 保留采样动作。训练归一化和奖励 potential 校准保持待生成；临时 reset probe 统计没有写成训练 artifact，正式 factory 需核对训练 artifact 路径/哈希、划分、特征顺序和实际统计，并以冻结 view 拒绝 fit/update。
+
+最终工程预检与配置锁位于 `logs/diagnostics/single_uav_ppo_pretraining_20261010_v1/preflight_final/`；配置 SHA-256 为 `bd34f163de64fc814cd21f705029343c4c4d45efa0ff7ace8a3ef6acbf07c609`。PASS_COMMIT 相关 75 项测试及 3 个子测试、PPO 相关 27 项测试通过。预检环境推进、backward 和 optimizer step 均为 0；未启动正式训练、重跑历史轨迹、提交或推送。完整协议见 `sections/single_uav_ppo_baseline_pretraining_v1.md`。此前 `preflight/` 是保留的中间检查记录，最终状态以 `preflight_final/` 为准。
+
+只读恢复及工程预检入口为：
+
+```text
+python main.py recover-pass-commit-summary
+python main.py prepare-single-uav-ppo --config data/configs/single_uav_ppo_baseline_v1.json --output logs/diagnostics/single_uav_ppo_pretraining_20261010_v1/preflight_final
+```
+
+上述默认输出已完成，入口拒绝覆盖；需要再次检查时使用新的输出目录。
+
+## 2026-10-10：单 UAV 静态绕障 PPO 两组 smoke 已执行
+
+基于前阶段冻结的统一环境新增 opt-in smoke 入口 `src/experiments/single_uav_ppo_smoke.py`，配套初始化、课程及只读产物审计模块。A 使用既有 42 维迁移 PPO，B 使用既有 BC/DAgger Actor 并进行了真实在线 PPO 微调。两组各保留 18 个兼容参数张量；因训练归一化语义改变，完整首层 GAT 与 Critic 使用相同 fresh constructor 初始化，旧 optimizer、rollout 与教师样本均未导入。42 维 Actor 中目标、估计速度和障碍相对方向的实际归一化输入及输出敏感性均通过检查。
+
+独立配置 `data/configs/single_uav_static_ppo_smoke_v1_seed2026.json`，两组相同三阶段课程与场景划分。训练池 18 场（各 6 normal/single/full），实际 PPO 接触 12 场，其余 6 场仅参与训练池校准；验证池独立为 2/4/4 场。无障碍归航停车、左右平衡单障碍、完整绕障后归航依次训练，并在后阶段回放早期场景。历史 20 回合未用于此次训练、统计、验证或模型选择。真实无障碍场景显式 `obstacles=[]`，避免环境对空 `obstacle_specs` 的历史默认障碍回退。
+
+每组执行 288 个校准步及 2160 个 PPO 在线步，总训练交互 2448；18 次 update、4 epochs、minibatch 64，最终 144 次实际 Adam step。校准流相同，仅拟合一份共享 train-only 统计，所有方向槽计数均为 306，训练/验证期间冻结。每组另有 3360 个 deterministic 验证步、28 个验证 episode，成本独立记录。采样动作/old log-prob 与执行动作、安全修正、总修正分别记录；每组两个动作/step CSV 各 5520 行逐条对齐，PPO buffer 没有校准、验证或教师样本。
+
+最终 10 场验证：A/B 稳定到达均 0/10，碰撞均 0/10、失败超时均 10/10；实体绕障 A 0/8、B 8/8。B 初始化时已是 8/8，通过率没有观察到本次 PPO 带来的提升。原始动作实体危险与基础安全投影均 0；边界投影 A 239/1200、B 765/1200，B 大量停在远离目标的边界，归航停车尚未建立。Actor/GAT/Critic 最终参数变化均非零、损失及梯度有限，B 的最终 Adam state 独立复核为 144 步，工程链路确认通过，不能据此宣称性能、泛化或一般安全性。
+
+B 最终 BC 的已知成本为 45 epochs、每轮 1728 样本，即 77760 次样本呈现、2430 个推导 batch step；前置 round0 另有 34560 次呈现、1080 batch step，已知 BC 工作流合计 112320/3510。教师完整采集/推理成本与墙钟时间缺少完整记录，保持未知，不计为本次在线 PPO。详细成本账本与标签条数口径分开保留。
+
+独立数据/checkpoint、CSV/报告、诊断图分别位于 `data/synthetic/`、`logs/preliminary/`、`plots/preliminary/` 下的 `single_uav_static_ppo_smoke_v1_seed2026/`，保存初始、三阶段、最终 checkpoint。统一实际 trainer 配置见 `effective_smoke_training_config.json`；总结见 `logs/preliminary/single_uav_static_ppo_smoke_v1_seed2026/smoke_summary.md`，协议见 `sections/single_uav_static_ppo_smoke_v1.md`。49 项相关测试、20 项独立产物检查与符号审计通过，71 个历史/冻结输入 SHA 一致。未覆盖历史结果，未启动多种子训练，未提交或推送。
+
+正式多种子性能比较前需先解决基础停车失败与边界依赖，再冻结实验版本、登记独立 seed、等量扩大的 PPO 预算和完整成本账本。运行入口如下，现有输出拒绝覆盖：
+
+```text
+python -m src.experiments.single_uav_ppo_smoke --config data/configs/single_uav_static_ppo_smoke_v1_seed2026.json
+python -m src.analysis.single_uav_ppo_smoke_audit data/synthetic/single_uav_static_ppo_smoke_v1_seed2026 logs/preliminary/single_uav_static_ppo_smoke_v1_seed2026
+```
