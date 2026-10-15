@@ -33,6 +33,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
+from ..control.goal_recovery_correction import compute_desired_goal_speed
 from ..simulation.motion_model import apply_velocity_increment, clip_vector_norm
 from ..simulation.obstacle_model import (
     BoxObstacle,
@@ -405,7 +406,13 @@ class GeometricObstacleOracleController:
         if bypass:
             return float(np.clip(max(ORACLE_MIN_BYPASS_SPEED_MPS, math.sqrt(max(0.0, 2.0 * self.motion.max_acceleration_mps2 * distance)),), ORACLE_MIN_BYPASS_SPEED_MPS, ORACLE_MAX_BYPASS_SPEED_MPS))
         goal_distance = float(np.linalg.norm(np.asarray(self.environment.goals[self.uav_id], dtype=float) - position))
-        return float(np.clip(math.sqrt(max(0.0, 2.0 * self.motion.max_acceleration_mps2 * max(goal_distance - 1.0, 0.0))), 0.35, self.cruise_speed_mps))
+        return compute_desired_goal_speed(
+            goal_distance,
+            max_acceleration_mps2=float(self.motion.max_acceleration_mps2),
+            goal_threshold_m=1.0,
+            minimum_speed_mps=0.35,
+            cruise_speed_mps=float(self.cruise_speed_mps),
+        )
 
     def action(
         self, observations: Mapping[str, Mapping[str, Any]]

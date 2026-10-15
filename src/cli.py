@@ -3812,6 +3812,41 @@ def _build_parser() -> argparse.ArgumentParser:
         help="notation registry Markdown file",
     )
 
+    pass_commit_recovery_parser = subparsers.add_parser(
+        "recover-pass-commit-summary",
+        help="recover a paired PASS_COMMIT summary from frozen CSVs without rollouts",
+    )
+    pass_commit_recovery_parser.add_argument("--project-root", type=Path, default=Path.cwd())
+    pass_commit_recovery_parser.add_argument(
+        "--source-root", type=Path,
+        default=Path("logs/preliminary/single_uav_pass_commit_diagnostic_seed2026/run_action_decomposition_fix_v1"),
+    )
+    pass_commit_recovery_parser.add_argument(
+        "--preparation-root", type=Path,
+        default=Path("logs/preliminary/single_uav_pass_commit_diagnostic_seed2026/preparation_action_decomposition_fix_v1"),
+    )
+    pass_commit_recovery_parser.add_argument(
+        "--output", type=Path,
+        default=Path("logs/preliminary/single_uav_pass_commit_diagnostic_seed2026/offline_recovery_action_decomposition_fix_v1_20261010"),
+    )
+    pass_commit_recovery_parser.add_argument(
+        "--baseline-manifest", type=Path,
+        default=Path("logs/diagnostics/single_uav_ppo_pretraining_20261010_v1/workspace_baseline.json"),
+    )
+
+    single_uav_ppo_prepare_parser = subparsers.add_parser(
+        "prepare-single-uav-ppo",
+        help="freeze and verify the isolated single-UAV PPO baseline without training",
+    )
+    single_uav_ppo_prepare_parser.add_argument(
+        "--config", type=Path,
+        default=Path("data/configs/single_uav_ppo_baseline_v1.json"),
+    )
+    single_uav_ppo_prepare_parser.add_argument(
+        "--output", type=Path,
+        default=Path("logs/diagnostics/single_uav_ppo_pretraining_20261010_v1/preflight"),
+    )
+
     return parser
 
 
@@ -3865,6 +3900,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
     args = parser.parse_args(raw_argv)
+    if args.command == "recover-pass-commit-summary":
+        from .pass_commit_finalization import recover_pass_commit_summary
+
+        summary = recover_pass_commit_summary(
+            project_root=args.project_root,
+            source_root=args.source_root,
+            preparation_root=args.preparation_root,
+            output_root=args.output,
+            baseline_manifest=args.baseline_manifest,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+        return 0
+    if args.command == "prepare-single-uav-ppo":
+        from .experiments.single_uav_ppo_baseline import prepare_single_uav_ppo
+
+        summary = prepare_single_uav_ppo(args.config, args.output)
+        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+        return 0 if summary.get("ok", False) else 1
     if args.command == "list-datasets":
         if args.json:
             print(json.dumps(registry_as_dicts(), ensure_ascii=False, indent=2))

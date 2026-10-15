@@ -27,7 +27,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import torch
 from torch import Tensor, nn
-from torch.distributions import Categorical, Dirichlet, Normal, TransformedDistribution, TanhTransform
+from torch.distributions import Bernoulli, Categorical, Dirichlet, Normal, TransformedDistribution, TanhTransform
 
 from .gat import EdgeGATNetwork
 from .measurement_proxy import (
@@ -117,6 +117,7 @@ def central_state_vector_dim(
     edge_feature_dim: int = 11,
     max_obstacles: int = 16,
     include_remaining_time: bool = False,
+    critic_measurement_budget_features: bool = False,
 ) -> int:
     """Return the fixed centralized-critic input dimension."""
 
@@ -128,6 +129,7 @@ def central_state_vector_dim(
         + 3 * edge_slots
         + max_obstacles * obstacle_dim
         + int(include_remaining_time)
+        + (uav_count if critic_measurement_budget_features else 0)
     )
 
 
@@ -178,6 +180,7 @@ def central_state_to_vector(
     edge_feature_dim: int = 11,
     max_obstacles: int = 16,
     include_remaining_time: bool = False,
+    critic_measurement_budget_features: bool = False,
 ) -> np.ndarray:
     """Convert the critic-visible central state to a fixed-size vector."""
 
@@ -208,8 +211,42 @@ def central_state_to_vector(
         if not np.isfinite(value) or not 0.0 <= value <= 1.0:
             raise ValueError("remaining_time_fraction must be finite and in [0, 1]")
         vector_parts.append(np.asarray([value], dtype=np.float32))
+    if critic_measurement_budget_features:
+        if not isinstance(state, Mapping) or "measurement_budget_remaining_ratios" not in state:
+            raise ValueError(
+                "measurement_budget_remaining_ratios is required when critic measurement budget features are enabled"
+            )
+        ratios = state["measurement_budget_remaining_ratios"]
+        if not isinstance(ratios, Mapping):
+            raise ValueError("measurement_budget_remaining_ratios must be a mapping")
+        expected = {f"uav_{index:02d}" for index in range(uav_count)}
+        if {str(key) for key in ratios} != expected:
+            raise ValueError(
+                "measurement_budget_remaining_ratios must contain exactly all UAV identifiers"
+            )
+        ordered_ratios: list[float] = []
+        for uav_id in (f"uav_{index:02d}" for index in range(uav_count)):
+            try:
+                ratio = float(ratios[uav_id])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    "measurement_budget_remaining_ratios contains an invalid value"
+                ) from exc
+            if not np.isfinite(ratio) or not 0.0 <= ratio <= 1.0:
+                raise ValueError(
+                    "measurement_budget_remaining_ratios values must be finite and in [0, 1]"
+                )
+            ordered_ratios.append(ratio)
+        vector_parts.append(np.asarray(ordered_ratios, dtype=np.float32))
     result = np.concatenate(vector_parts).astype(np.float32)
-    expected = central_state_vector_dim(uav_count, node_feature_dim, edge_feature_dim, max_obstacles, include_remaining_time)
+    expected = central_state_vector_dim(
+        uav_count,
+        node_feature_dim,
+        edge_feature_dim,
+        max_obstacles,
+        include_remaining_time,
+        critic_measurement_budget_features,
+    )
     if result.size != expected:  # defensive guard for future schema changes
         result = _fit_length(result, expected)
     return result
@@ -265,6 +302,7 @@ class MAPPOConfig:
     critic_hidden_dim: int = 128
     max_obstacles: int = 16
     max_delta_v: float = 0.6
+    motion_action_mode: str = "joint"
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_epsilon: float = 0.2
@@ -384,6 +422,14 @@ class MAPPOConfig:
     # the historical single global norm clip; ``actor_critic`` keeps a large
     # critic target from suppressing the actor/measurement update.
     gradient_clip_scope: str = "joint"
+    # ``all`` preserves the historical fixed-navigation communication policy.
+    # ``measurement_only`` learns only the masked measurement categorical and
+    # delegates navigation plus outgoing bandwidth to the fixed protocol.
+    communication_learning_scope: str = "all"
+    # Optional centralized-critic accounting context.  The actor never sees
+    # this block; when enabled it is appended after remaining time in the
+    # CTDE-only central-state vector.
+    critic_measurement_budget_features: bool = False
 
     def __post_init__(self) -> None:
         if self.episode_objective not in {"legacy", "finite_horizon"}:
@@ -398,6 +444,22 @@ class MAPPOConfig:
             raise ValueError("feature dimensions must be positive")
         if self.max_delta_v <= 0 or not 0 < self.gamma <= 1 or not 0 <= self.gae_lambda <= 1:
             raise ValueError("invalid motion or discount configuration")
+        if self.motion_action_mode not in {"joint", "fixed_navigation_comm_v1"}:
+            raise ValueError("motion_action_mode must be 'joint' or 'fixed_navigation_comm_v1'")
+        if self.motion_action_mode == "fixed_navigation_comm_v1":
+            if self.ppo_action_logprob_mode != "sampled":
+                raise ValueError("fixed_navigation_comm_v1 requires sampled PPO log probabilities")
+            if not math.isclose(float(self.max_delta_v), 0.6, rel_tol=0.0, abs_tol=1e-12):
+                raise ValueError("fixed_navigation_comm_v1 requires max_delta_v=0.6")
+        if self.communication_learning_scope not in {"all", "measurement_only"}:
+            raise ValueError("communication_learning_scope must be 'all' or 'measurement_only'")
+        if self.communication_learning_scope == "measurement_only":
+            if self.motion_action_mode != "fixed_navigation_comm_v1":
+                raise ValueError(
+                    "measurement_only communication learning requires fixed_navigation_comm_v1"
+                )
+            if self.ppo_action_logprob_mode != "sampled":
+                raise ValueError("measurement_only communication learning requires sampled PPO log probabilities")
         if self.policy_epochs < 1 or self.minibatch_size < 1 or self.learning_rate <= 0 or self.initial_delta_std <= 0:
             raise ValueError("invalid optimizer configuration")
         if not math.isfinite(float(self.max_grad_norm)) or float(self.max_grad_norm) <= 0.0:
@@ -589,6 +651,7 @@ class MAPPOConfig:
             self.edge_feature_dim,
             self.max_obstacles,
             self.include_remaining_time,
+            self.critic_measurement_budget_features,
         )
 
 
@@ -607,6 +670,9 @@ class PolicySample:
     )
     executed_delta_v: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.float32)
+    )
+    executed_link_selection: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=bool)
     )
     action_execution_changed: bool = False
     measurement_probabilities: np.ndarray = field(
@@ -670,6 +736,12 @@ class PolicySample:
         default_factory=lambda: np.empty(0, dtype=np.float32)
     )
     none_logit_raw: float = 0.0
+    # Fixed-navigation communication mode metadata.  Empty defaults preserve
+    # the historical joint-action sample schema and behavior.
+    link_selection: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=bool))
+    sampled_link_probabilities: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float32)
+    )
 
 
 @dataclass
@@ -827,8 +899,30 @@ class MAPPOPolicy(nn.Module):
             init_seed,
             89,
         )
+        # The communication-only protocol adds one isolated Bernoulli link
+        # head after all historical modules have been constructed.  Keeping
+        # this branch last leaves the legacy module graph and RNG stream
+        # untouched.
+        if config.motion_action_mode == "fixed_navigation_comm_v1":
+            self.link_selection_head = _construct_with_seed(
+                lambda: nn.Linear(config.actor_hidden_dim, config.uav_count),
+                init_seed,
+                173,
+            )
+            self.delta_mean_head.requires_grad_(False)
+            self.delta_logstd.requires_grad_(False)
+            if config.communication_learning_scope == "measurement_only":
+                # Keep the historical fixed-communication modules in the
+                # state-dict, but make the delegated protocol explicit in
+                # autograd and optimizer construction.
+                self.bandwidth_head.requires_grad_(False)
+                self.link_selection_head.requires_grad_(False)
+        else:
+            self.link_selection_head = None
         self._last_graph_trace: dict[str, Any] | None = None
         self._last_measurement_head_trace: dict[str, Any] = {}
+        self._last_link_logits: Tensor | None = None
+        self._last_link_legal_mask: Tensor | None = None
         self.to(self.device)
         self._initial_parameter_hashes = self.parameter_initialization_hashes()
 
@@ -857,6 +951,8 @@ class MAPPOPolicy(nn.Module):
         # default GAT experiment.
         if self.mlp_flat_encoder is not None:
             hashes["mlp_flat_encoder"] = _module_state_hash(self.mlp_flat_encoder)
+        if self.link_selection_head is not None:
+            hashes["link_selection_head"] = _module_state_hash(self.link_selection_head)
         return hashes
 
     def initial_parameter_initialization_hashes(self) -> dict[str, str]:
@@ -1245,7 +1341,51 @@ class MAPPOPolicy(nn.Module):
             else 0.0
         )
 
-        def covariance_confidence(row_index: int | None) -> float:
+        def covariance_confidence(row_index: int | None, source_id: str | None = None) -> float:
+            if self.config.communication_learning_scope == "measurement_only":
+                # The normalized node row stores covariance diagonals after
+                # the 15-state block (columns 15:30).  The historical branch
+                # intentionally keeps its original column-12:15 descriptor
+                # for checkpoint and audit compatibility.  The new
+                # measurement-only protocol reads the actor-visible physical
+                # covariance instead, which avoids that layout bias.
+                resolved_source_id = source_id
+                if resolved_source_id is None and row_index is not None:
+                    for candidate_id, candidate_row in node_by_id.items():
+                        if candidate_row == row_index:
+                            resolved_source_id = candidate_id
+                            break
+                if resolved_source_id == root_id:
+                    covariance_value = observation.get("covariance", None)
+                else:
+                    messages = observation.get("neighbor_messages", {})
+                    message = (
+                        messages.get(resolved_source_id, {})
+                        if isinstance(messages, Mapping)
+                        else {}
+                    )
+                    covariance_value = message.get("covariance") if isinstance(message, Mapping) else None
+                try:
+                    covariance = np.asarray(covariance_value, dtype=np.float64)
+                except (TypeError, ValueError):
+                    return 0.0
+                if covariance.ndim != 2 or covariance.shape[0] < 3 or covariance.shape[1] < 3:
+                    return 0.0
+                covariance = covariance[:3, :3]
+                if not np.isfinite(covariance).all() or not np.allclose(
+                    covariance, covariance.T, rtol=0.0, atol=1e-6
+                ):
+                    return 0.0
+                try:
+                    eigenvalues = np.linalg.eigvalsh(covariance)
+                except np.linalg.LinAlgError:
+                    return 0.0
+                if not np.isfinite(eigenvalues).all() or float(eigenvalues.min()) < -1e-6:
+                    return 0.0
+                trace_per_axis = float(np.trace(covariance) / 3.0)
+                if not np.isfinite(trace_per_axis) or trace_per_axis < 0.0:
+                    return 0.0
+                return float(np.clip(1.0 / (1.0 + trace_per_axis), 0.0, 1.0))
             if row_index is None or row_index < 0 or row_index >= int(node.shape[0]) or int(node.shape[1]) < 15:
                 return 0.0
             diagonal = torch.abs(node[row_index, 12:15])
@@ -1257,9 +1397,12 @@ class MAPPOPolicy(nn.Module):
             return float(np.clip(1.0 / (1.0 + value), 0.0, 1.0))
 
         root_id = str(observation.get("uav_id", self.uav_ids[0]))
-        local_covariance_confidence = covariance_confidence(node_by_id.get(root_id, 0))
+        local_covariance_confidence = covariance_confidence(
+            node_by_id.get(root_id, 0), root_id
+        )
         neighbor_covariance_confidence = covariance_confidence(
-            node_by_id.get(source) if source_visible else None
+            node_by_id.get(source) if source_visible else None,
+            source if source_visible else None,
         )
         packet_quality = bounded_quality(
             link.get("packet_loss", edge_values[7] if edge_values.size > 7 else 0.0),
@@ -1534,9 +1677,65 @@ class MAPPOPolicy(nn.Module):
     def measurement_head_mode_is_global(self) -> bool:
         return self.config.measurement_head_mode == "global_mean"
 
+    def _fixed_local_uav_id(self, observation: Mapping[str, Any], node_ids: Sequence[str]) -> str:
+        """Resolve the local identity used by fixed communication masks."""
+
+        fallback = str(node_ids[0]) if node_ids else self.uav_ids[0]
+        candidate = str(observation.get("uav_id", fallback)).removeprefix("candidate:")
+        if candidate in self.uav_ids:
+            return candidate
+        for node_id in node_ids:
+            token = str(node_id).removeprefix("candidate:")
+            if not str(node_id).startswith("candidate:") and token in self.uav_ids:
+                return token
+        return self.uav_ids[0]
+
+    def _fixed_potential_targets(
+        self, observation: Mapping[str, Any]
+    ) -> set[str] | None:
+        """Return optional explicit potential-link identities."""
+
+        if "potential_targets" not in observation:
+            return None
+        value = observation.get("potential_targets")
+        if isinstance(value, Mapping):
+            return {str(key) for key, allowed in value.items() if bool(allowed)}
+        try:
+            return {str(item) for item in value}
+        except TypeError as exc:
+            raise ValueError("potential_targets must be a mapping or iterable") from exc
+
+    def _fixed_action_masks(
+        self,
+        observation: Mapping[str, Any],
+        action_mask: Tensor,
+        bandwidth_mask: Tensor,
+        node_ids: Sequence[str],
+    ) -> tuple[Tensor, Tensor]:
+        """Apply explicit self/non-potential masking for the fixed protocol."""
+
+        own_id = self._fixed_local_uav_id(observation, node_ids)
+        potential = self._fixed_potential_targets(observation)
+        measurement_mask = action_mask.clone().to(dtype=torch.bool)
+        measurement_mask[self.config.uav_count] = True
+        legal_links = bandwidth_mask.clone().to(dtype=torch.bool)
+        for index, uid in enumerate(self.uav_ids):
+            allowed = bool(measurement_mask[index]) and uid != own_id
+            # Receiver-side measurement legality already comes from the
+            # incoming action mask.  Outgoing recipients may be asymmetric.
+            measurement_mask[index] = allowed
+            legal = bool(legal_links[index]) and uid != own_id
+            if potential is not None:
+                legal = legal and uid in potential
+            legal_links[index] = legal
+        if not bool(measurement_mask[: self.config.uav_count].any()):
+            measurement_mask[:] = False
+            measurement_mask[self.config.uav_count] = True
+        return measurement_mask, legal_links
+
     def _actor_distributions(
         self, observation: Mapping[str, Any]
-    ) -> tuple[Categorical, Tensor, TransformedDistribution, Tensor]:
+    ) -> tuple[Categorical, Tensor | None, TransformedDistribution | None, Tensor]:
         context, action_mask, bandwidth_mask, _effective, _potential, embedding, node_ids = self._local_context(observation)
         hidden = self.actor_body(context)
         quality_features = self._measurement_quality_features(observation)
@@ -1633,11 +1832,41 @@ class MAPPOPolicy(nn.Module):
             else np.empty(0, dtype=np.float32),
             "persistent_horizon": int(self.config.measurement_persistent_proxy_horizon),
         }
+        if self.config.motion_action_mode == "fixed_navigation_comm_v1":
+            fixed_measurement_mask, legal_links = self._fixed_action_masks(
+                observation, action_mask, bandwidth_mask, node_ids
+            )
+        else:
+            fixed_measurement_mask, legal_links = action_mask, bandwidth_mask
         measurement_logits, measurement_mask = _masked_logits(
             adjusted_measurement_logits,
-            action_mask[: self.config.uav_count + 1],
+            fixed_measurement_mask[: self.config.uav_count + 1],
             none_index=self.config.uav_count,
         )
+        if self.config.communication_learning_scope == "measurement_only":
+            # The fixed protocol owns navigation and outgoing bandwidth.  Do
+            # not even evaluate those heads: this keeps the branch categorical
+            # only and makes accidental learned communication gradients
+            # impossible.
+            self._last_link_logits = None
+            self._last_link_legal_mask = legal_links
+            return (
+                Categorical(logits=measurement_logits),
+                None,
+                None,
+                measurement_mask,
+            )
+        if self.config.motion_action_mode == "fixed_navigation_comm_v1":
+            if self.link_selection_head is None:  # defensive guard for malformed state
+                raise RuntimeError("fixed navigation link-selection head is not initialized")
+            self._last_link_logits = self.link_selection_head(hidden)
+            self._last_link_legal_mask = legal_links
+            return (
+                Categorical(logits=measurement_logits),
+                self.bandwidth_head(hidden),
+                None,
+                measurement_mask,
+            )
         mean = self.delta_mean_head(hidden)
         std = torch.exp(self.delta_logstd).clamp(min=1e-4, max=10.0)
         delta_distribution = TransformedDistribution(
@@ -1661,7 +1890,234 @@ class MAPPOPolicy(nn.Module):
     def _uav_id(self, index: int) -> str:
         return "none" if index >= self.config.uav_count else self.uav_ids[index]
 
+    def _act_communication_only(
+        self, observation: Mapping[str, Any], *, deterministic: bool = False
+    ) -> tuple[dict[str, Any], PolicySample]:
+        """Sample the communication-only action used by fixed navigation."""
+
+        measurement, bandwidth_logits, motion_distribution, _measurement_mask = self._actor_distributions(
+            observation
+        )
+        if motion_distribution is not None or self._last_link_logits is None or self._last_link_legal_mask is None:
+            raise RuntimeError("fixed communication distributions were not initialized")
+        measurement_index = (
+            int(torch.argmax(measurement.probs).item())
+            if deterministic
+            else int(measurement.sample().item())
+        )
+        legal_mask = self._last_link_legal_mask.to(device=self.device, dtype=torch.bool)
+        link_distribution = Bernoulli(logits=self._last_link_logits[legal_mask])
+        link_probabilities = torch.zeros(self.config.uav_count, dtype=torch.float32, device=self.device)
+        link_probabilities[legal_mask] = link_distribution.probs
+        sampled_links = torch.zeros(self.config.uav_count, dtype=torch.bool, device=self.device)
+        sampled_links[legal_mask] = (
+            link_distribution.probs >= 0.5
+            if deterministic
+            else link_distribution.sample().to(dtype=torch.bool)
+        )
+        link_log_prob = link_distribution.log_prob(sampled_links[legal_mask].to(dtype=torch.float32)).sum()
+
+        bandwidth = torch.zeros(self.config.uav_count, dtype=torch.float32, device=self.device)
+        active_mask = sampled_links & legal_mask
+        active_indices = torch.nonzero(active_mask, as_tuple=False).flatten()
+        active_count = int(active_indices.numel())
+        if active_count == 1:
+            bandwidth[active_indices[0]] = 1.0
+            bandwidth_log_prob = torch.zeros((), dtype=torch.float32, device=self.device)
+        elif active_count >= 2:
+            concentrations = torch.nn.functional.softplus(bandwidth_logits[active_mask]) + 1.0
+            bandwidth_distribution = Dirichlet(concentrations)
+            active_bandwidth = (
+                concentrations / concentrations.sum()
+                if deterministic
+                else bandwidth_distribution.sample()
+            )
+            bandwidth[active_mask] = active_bandwidth
+            bandwidth_log_prob = bandwidth_distribution.log_prob(active_bandwidth)
+        else:
+            bandwidth_log_prob = torch.zeros((), dtype=torch.float32, device=self.device)
+
+        log_prob = (
+            measurement.log_prob(torch.tensor(measurement_index, device=self.device))
+            + link_log_prob
+            + bandwidth_log_prob
+        )
+        bandwidth_action = {
+            self.uav_ids[index]: float(bandwidth[index].detach().cpu())
+            for index in torch.nonzero(legal_mask, as_tuple=False).flatten().tolist()
+        }
+        action = {
+            "measurement_uav_id": self._uav_id(measurement_index),
+            "bandwidth": bandwidth_action,
+        }
+        quality_risk = np.asarray(observation.get("measurement_quality_risk", []), dtype=np.float32).reshape(-1)
+        quality_valid = np.asarray(observation.get("measurement_quality_valid", []), dtype=np.float32).reshape(-1)
+        head_trace = self._last_measurement_head_trace
+        sample = PolicySample(
+            measurement_index=measurement_index,
+            bandwidth=bandwidth.detach().cpu().numpy().astype(np.float32),
+            delta_raw=np.empty(0, dtype=np.float32),
+            delta_v=np.empty(0, dtype=np.float32),
+            old_log_prob=float(log_prob.detach().cpu()),
+            measurement_probabilities=measurement.probs.detach().cpu().numpy().astype(np.float32),
+            selected_quality_risk=(
+                float(quality_risk[measurement_index]) if measurement_index < quality_risk.size else -1.0
+            ),
+            selected_quality_valid=(
+                float(quality_valid[measurement_index]) if measurement_index < quality_valid.size else 0.0
+            ),
+            measurement_logits_raw=np.asarray(head_trace.get("raw_logits", []), dtype=np.float32).copy(),
+            measurement_quality_penalty=np.asarray(head_trace.get("quality_penalty", []), dtype=np.float32).copy(),
+            measurement_logits_adjusted=np.asarray(head_trace.get("adjusted_logits", []), dtype=np.float32).copy(),
+            measurement_quality_logit_penalty=float(head_trace.get("coefficient", 0.0)),
+            measurement_proxy_gain=np.asarray(head_trace.get("proxy_gain", []), dtype=np.float32).copy(),
+            measurement_proxy_cost=np.asarray(head_trace.get("proxy_cost", []), dtype=np.float32).copy(),
+            measurement_proxy_valid=np.asarray(head_trace.get("proxy_valid", []), dtype=np.float32).copy(),
+            measurement_proxy_utility=np.asarray(head_trace.get("proxy_utility", []), dtype=np.float32).copy(),
+            persistent_proxy_gain=np.asarray(head_trace.get("persistent_gain", []), dtype=np.float32).copy(),
+            persistent_proxy_cost=np.asarray(head_trace.get("persistent_cost", []), dtype=np.float32).copy(),
+            persistent_proxy_valid=np.asarray(head_trace.get("persistent_valid", []), dtype=np.float32).copy(),
+            persistent_proxy_utility=np.asarray(head_trace.get("persistent_utility", []), dtype=np.float32).copy(),
+            candidate_source_ids=[str(value) for value in head_trace.get("candidate_source_ids", [])],
+            candidate_visible=np.asarray(head_trace.get("candidate_visible", []), dtype=np.float32).copy(),
+            candidate_action_mask=np.asarray(head_trace.get("candidate_action_mask", []), dtype=np.float32).copy(),
+            candidate_action_features=np.asarray(head_trace.get("candidate_action_features", []), dtype=np.float32).copy(),
+            candidate_quality_scores=np.asarray(head_trace.get("candidate_quality_scores", []), dtype=np.float32).copy(),
+            none_context_summary=np.asarray(head_trace.get("none_context_summary", []), dtype=np.float32).copy(),
+            none_logit_raw=float(
+                head_trace.get("raw_logits", [0.0] * (self.config.uav_count + 1))[-1]
+                if len(head_trace.get("raw_logits", [])) > self.config.uav_count else 0.0
+            ),
+            link_selection=sampled_links.detach().cpu().numpy().astype(bool),
+            sampled_link_probabilities=link_probabilities.detach().cpu().numpy().astype(np.float32),
+        )
+        return action, sample
+
+    def _act_measurement_only(
+        self, observation: Mapping[str, Any], *, deterministic: bool = False
+    ) -> tuple[dict[str, Any], PolicySample]:
+        """Sample only the measurement categorical for fixed navigation.
+
+        Outgoing bandwidth is a fixed execution request for every currently
+        legal potential target.  It is intentionally absent from the policy
+        sample so PPO's probability ratio contains only the measurement
+        categorical term.
+        """
+
+        measurement, bandwidth_logits, motion_distribution, _measurement_mask = self._actor_distributions(
+            observation
+        )
+        if bandwidth_logits is not None or motion_distribution is not None:
+            raise RuntimeError("measurement-only communication distributions were not initialized")
+        measurement_index = (
+            int(torch.argmax(measurement.probs).item())
+            if deterministic
+            else int(measurement.sample().item())
+        )
+        legal_mask = self._last_link_legal_mask
+        if legal_mask is None:
+            raise RuntimeError("measurement-only fixed action mask was not initialized")
+        legal_mask_np = legal_mask.detach().cpu().numpy().astype(bool)
+        bandwidth_action = {
+            self.uav_ids[index]: 0.5
+            for index in np.flatnonzero(legal_mask_np).tolist()
+        }
+        action = {
+            "measurement_uav_id": self._uav_id(measurement_index),
+            "bandwidth": bandwidth_action,
+        }
+        quality_risk = np.asarray(
+            observation.get("measurement_quality_risk", []), dtype=np.float32
+        ).reshape(-1)
+        quality_valid = np.asarray(
+            observation.get("measurement_quality_valid", []), dtype=np.float32
+        ).reshape(-1)
+        head_trace = self._last_measurement_head_trace
+        raw_logits = np.asarray(head_trace.get("raw_logits", []), dtype=np.float32).copy()
+        sample = PolicySample(
+            measurement_index=measurement_index,
+            bandwidth=np.empty(0, dtype=np.float32),
+            delta_raw=np.empty(0, dtype=np.float32),
+            delta_v=np.empty(0, dtype=np.float32),
+            old_log_prob=float(
+                measurement.log_prob(
+                    torch.tensor(measurement_index, dtype=torch.long, device=self.device)
+                ).detach().cpu()
+            ),
+            measurement_probabilities=measurement.probs.detach().cpu().numpy().astype(np.float32),
+            selected_quality_risk=(
+                float(quality_risk[measurement_index])
+                if measurement_index < quality_risk.size
+                else -1.0
+            ),
+            selected_quality_valid=(
+                float(quality_valid[measurement_index])
+                if measurement_index < quality_valid.size
+                else 0.0
+            ),
+            measurement_logits_raw=raw_logits,
+            measurement_quality_penalty=np.asarray(
+                head_trace.get("quality_penalty", []), dtype=np.float32
+            ).copy(),
+            measurement_logits_adjusted=np.asarray(
+                head_trace.get("adjusted_logits", []), dtype=np.float32
+            ).copy(),
+            measurement_quality_logit_penalty=float(head_trace.get("coefficient", 0.0)),
+            measurement_proxy_gain=np.asarray(
+                head_trace.get("proxy_gain", []), dtype=np.float32
+            ).copy(),
+            measurement_proxy_cost=np.asarray(
+                head_trace.get("proxy_cost", []), dtype=np.float32
+            ).copy(),
+            measurement_proxy_valid=np.asarray(
+                head_trace.get("proxy_valid", []), dtype=np.float32
+            ).copy(),
+            measurement_proxy_utility=np.asarray(
+                head_trace.get("proxy_utility", []), dtype=np.float32
+            ).copy(),
+            persistent_proxy_gain=np.asarray(
+                head_trace.get("persistent_gain", []), dtype=np.float32
+            ).copy(),
+            persistent_proxy_cost=np.asarray(
+                head_trace.get("persistent_cost", []), dtype=np.float32
+            ).copy(),
+            persistent_proxy_valid=np.asarray(
+                head_trace.get("persistent_valid", []), dtype=np.float32
+            ).copy(),
+            persistent_proxy_utility=np.asarray(
+                head_trace.get("persistent_utility", []), dtype=np.float32
+            ).copy(),
+            candidate_source_ids=[
+                str(value) for value in head_trace.get("candidate_source_ids", [])
+            ],
+            candidate_visible=np.asarray(
+                head_trace.get("candidate_visible", []), dtype=np.float32
+            ).copy(),
+            candidate_action_mask=np.asarray(
+                head_trace.get("candidate_action_mask", []), dtype=np.float32
+            ).copy(),
+            candidate_action_features=np.asarray(
+                head_trace.get("candidate_action_features", []), dtype=np.float32
+            ).copy(),
+            candidate_quality_scores=np.asarray(
+                head_trace.get("candidate_quality_scores", []), dtype=np.float32
+            ).copy(),
+            none_context_summary=np.asarray(
+                head_trace.get("none_context_summary", []), dtype=np.float32
+            ).copy(),
+            none_logit_raw=float(
+                raw_logits[-1] if raw_logits.size > self.config.uav_count else 0.0
+            ),
+            link_selection=np.empty(0, dtype=bool),
+            sampled_link_probabilities=np.empty(0, dtype=np.float32),
+        )
+        return action, sample
+
     def act(self, observation: Mapping[str, Any], *, deterministic: bool = False) -> tuple[dict[str, Any], PolicySample]:
+        if self.config.motion_action_mode == "fixed_navigation_comm_v1":
+            if self.config.communication_learning_scope == "measurement_only":
+                return self._act_measurement_only(observation, deterministic=deterministic)
+            return self._act_communication_only(observation, deterministic=deterministic)
         measurement, bandwidth_logits, delta_distribution, _measurement_mask = self._actor_distributions(observation)
         measurement_index = int(torch.argmax(measurement.probs).item()) if deterministic else int(measurement.sample().item())
         bandwidth_mask = torch.as_tensor(
@@ -1789,7 +2245,91 @@ class MAPPOPolicy(nn.Module):
         trace = copy.deepcopy(self._last_graph_trace or {})
         return action, sample, trace
 
+    def _evaluate_communication_only(
+        self, observation: Mapping[str, Any], sample: PolicySample
+    ) -> tuple[Tensor, Tensor]:
+        """Evaluate a fixed-navigation communication sample exactly as stored."""
+
+        measurement, bandwidth_logits, motion_distribution, measurement_mask = self._actor_distributions(observation)
+        if motion_distribution is not None or self._last_link_logits is None or self._last_link_legal_mask is None:
+            raise RuntimeError("fixed communication distributions were not initialized")
+        delta_raw = np.asarray(sample.delta_raw, dtype=np.float32).reshape(-1)
+        delta_v = np.asarray(sample.delta_v, dtype=np.float32).reshape(-1)
+        if delta_raw.size != 0 or delta_v.size != 0:
+            raise ValueError("fixed navigation samples must not contain learned motion values")
+        measurement_index = int(sample.measurement_index)
+        if not 0 <= measurement_index <= self.config.uav_count:
+            raise ValueError("measurement index is outside the fixed action table")
+        if not bool(measurement_mask[measurement_index]):
+            raise ValueError("sampled measurement source is masked in the fixed action table")
+
+        legal_mask = self._last_link_legal_mask.to(device=self.device, dtype=torch.bool)
+        links = np.asarray(sample.link_selection, dtype=bool).reshape(-1)
+        if links.size != self.config.uav_count:
+            raise ValueError("fixed navigation link_selection must have one entry per UAV")
+        if np.any(links & ~legal_mask.detach().cpu().numpy().astype(bool)):
+            raise ValueError("sampled fixed-navigation link is not legal")
+        link_tensor = torch.as_tensor(links, dtype=torch.float32, device=self.device)
+        link_distribution = Bernoulli(logits=self._last_link_logits[legal_mask])
+        log_prob = measurement.log_prob(torch.tensor(measurement_index, dtype=torch.long, device=self.device))
+        log_prob = log_prob + link_distribution.log_prob(link_tensor[legal_mask]).sum()
+
+        bandwidth = np.asarray(sample.bandwidth, dtype=np.float32).reshape(-1).copy()
+        if bandwidth.size != self.config.uav_count or not np.isfinite(bandwidth).all():
+            raise ValueError("fixed-navigation bandwidth must be finite with one entry per UAV")
+        legal = legal_mask.detach().cpu().numpy().astype(bool)
+        if np.any(np.abs(bandwidth[~legal]) > 1e-6):
+            raise ValueError("non-legal fixed-navigation bandwidth entries must be zero")
+        active = links & legal
+        if np.any(bandwidth[~active] != 0.0):
+            raise ValueError("inactive fixed-navigation bandwidth entries must be zero")
+        active_count = int(active.sum())
+        if active_count == 0:
+            if np.any(np.abs(bandwidth) > 1e-6):
+                raise ValueError("zero-link fixed-navigation action must have zero bandwidth")
+            bandwidth_entropy = torch.zeros((), dtype=torch.float32, device=self.device)
+        elif active_count == 1:
+            if not np.isclose(float(bandwidth[active][0]), 1.0, atol=1e-6, rtol=0.0):
+                raise ValueError("single-link fixed-navigation bandwidth must equal one")
+            if np.any(np.abs(bandwidth[active] - 1.0) > 1e-6):
+                raise ValueError("single-link fixed-navigation bandwidth is invalid")
+            bandwidth_entropy = torch.zeros((), dtype=torch.float32, device=self.device)
+        else:
+            active_values = bandwidth[active]
+            if np.any(active_values <= 0.0) or not np.isclose(float(active_values.sum()), 1.0, atol=1e-6, rtol=0.0):
+                raise ValueError("multi-link fixed-navigation bandwidth must be a positive simplex")
+            concentrations = torch.nn.functional.softplus(bandwidth_logits[torch.as_tensor(active, device=self.device)]) + 1.0
+            bandwidth_distribution = Dirichlet(concentrations)
+            active_tensor = torch.as_tensor(active_values, dtype=torch.float32, device=self.device)
+            log_prob = log_prob + bandwidth_distribution.log_prob(active_tensor)
+            bandwidth_entropy = bandwidth_distribution.entropy()
+        entropy = measurement.entropy() + link_distribution.entropy().sum() + bandwidth_entropy
+        return log_prob, entropy
+
     def evaluate_actions(self, observation: Mapping[str, Any], sample: PolicySample) -> tuple[Tensor, Tensor]:
+        if self.config.motion_action_mode == "fixed_navigation_comm_v1":
+            if self.config.communication_learning_scope == "measurement_only":
+                for name, values in (
+                    ("bandwidth", sample.bandwidth),
+                    ("delta_raw", sample.delta_raw),
+                    ("delta_v", sample.delta_v),
+                    ("link_selection", sample.link_selection),
+                    ("sampled_link_probabilities", sample.sampled_link_probabilities),
+                ):
+                    if np.asarray(values).size:
+                        raise ValueError(
+                            f"measurement-only samples must not contain learned {name} values"
+                        )
+                measurement, _bandwidth_logits, _motion_distribution, _measurement_mask = self._actor_distributions(
+                    observation
+                )
+                if not 0 <= int(sample.measurement_index) <= self.config.uav_count or not bool(_measurement_mask[int(sample.measurement_index)]):
+                    raise ValueError("measurement-only sample selects an invalid or masked category")
+                measurement_index = torch.tensor(
+                    sample.measurement_index, dtype=torch.long, device=self.device
+                )
+                return measurement.log_prob(measurement_index), measurement.entropy()
+            return self._evaluate_communication_only(observation, sample)
         measurement, bandwidth_logits, delta_distribution, _measurement_mask = self._actor_distributions(observation)
         measurement_index = torch.tensor(sample.measurement_index, dtype=torch.long, device=self.device)
         log_prob = measurement.log_prob(measurement_index)
@@ -2102,8 +2642,13 @@ class MAPPOTrainer:
         # the versioned stability experiments and keeps actor/critic rates
         # explicit without changing old checkpoint semantics.
         if float(self.config.actor_learning_rate_scale) == 1.0:
+            optimizer_parameters = (
+                [parameter for parameter in self.policy.parameters() if parameter.requires_grad]
+                if self.config.communication_learning_scope == "measurement_only"
+                else self.policy.parameters()
+            )
             self.optimizer = torch.optim.Adam(
-                self.policy.parameters(), lr=float(self.config.learning_rate)
+                optimizer_parameters, lr=float(self.config.learning_rate)
             )
         else:
             critic_parameters = list(self.policy.critic.parameters())
@@ -2112,6 +2657,7 @@ class MAPPOTrainer:
                 parameter
                 for parameter in self.policy.parameters()
                 if id(parameter) not in critic_parameter_ids
+                and (self.config.communication_learning_scope != "measurement_only" or parameter.requires_grad)
             ]
             if not actor_parameters or not critic_parameters or (
                 len({id(parameter) for parameter in actor_parameters} & critic_parameter_ids) != 0
@@ -2203,6 +2749,12 @@ class MAPPOTrainer:
             "max_delta_v": motion.max_acceleration_mps2 * motion.dt_s,
         }
         defaults.update(overrides)
+        if defaults.get("motion_action_mode") == "fixed_navigation_comm_v1":
+            if not (math.isclose(motion.dt_s, .2) and math.isclose(motion.max_acceleration_mps2, 3.)
+                    and math.isclose(motion.max_speed_mps, 12.)
+                    and np.array_equal(motion.bounds_min_m, [0., 0., 2.])
+                    and np.array_equal(motion.bounds_max_m, [200., 200., 60.])):
+                raise ValueError("fixed navigation requires the validated motion contract")
         # MAPPOConfig validates the persistent-proxy feature block before the
         # trainer receives the separately stored model.  Mirror the explicit
         # trainer argument into the config so the validation sees the same
@@ -2261,6 +2813,11 @@ class MAPPOTrainer:
                 )
                 for uav_id, local in working_observations.items()
             }
+        # Fixed navigation consumes this pre-normalization copy.  The policy
+        # still receives the historical normalized observations for its graph
+        # and communication heads.
+        raw_navigation_observations = (copy.deepcopy(working_observations)
+                                      if self.config.motion_action_mode == "fixed_navigation_comm_v1" else {})
         normalized = self.normalizer.transform(working_observations)
         actions: dict[str, dict[str, Any]] = {}
         samples: dict[str, PolicySample] = {}
@@ -2282,6 +2839,14 @@ class MAPPOTrainer:
             actions[uav_id] = action
             samples[uav_id] = sample
             graph_traces[uav_id] = trace
+        navigation_diagnostics: dict[str, dict[str, Any]] = {}
+        if self.config.motion_action_mode == "fixed_navigation_comm_v1":
+            from ..control.fixed_navigation_execution import compose_fixed_navigation_actions
+
+            actions, navigation_diagnostics = compose_fixed_navigation_actions(
+                raw_navigation_observations,
+                actions,
+            )
         central_vector = central_state_to_vector(
             central_state,
             uav_count=self.config.uav_count,
@@ -2289,10 +2854,100 @@ class MAPPOTrainer:
             edge_feature_dim=self.config.edge_feature_dim,
             max_obstacles=self.config.max_obstacles,
             include_remaining_time=self.config.include_remaining_time,
+            critic_measurement_budget_features=self.config.critic_measurement_budget_features,
         )
         central_vector = self.central_normalizer.transform(central_vector)
         with torch.no_grad():
             value = float(self.policy.value(central_vector).item())
+        measurement_diagnostics = {
+            uav_id: {
+                "measurement_probabilities": sample.measurement_probabilities.copy(),
+                "selected_quality_risk": float(sample.selected_quality_risk),
+                "selected_quality_valid": float(sample.selected_quality_valid),
+                "measurement_logits_raw": sample.measurement_logits_raw.copy(),
+                "measurement_quality_penalty": sample.measurement_quality_penalty.copy(),
+                "measurement_logits_adjusted": sample.measurement_logits_adjusted.copy(),
+                "candidate_source_ids": list(sample.candidate_source_ids),
+                "candidate_visible": sample.candidate_visible.copy(),
+                "candidate_action_mask": sample.candidate_action_mask.copy(),
+                "candidate_action_features": sample.candidate_action_features.copy(),
+                "candidate_quality_scores": sample.candidate_quality_scores.copy(),
+                "none_context_summary": sample.none_context_summary.copy(),
+                "none_logit_raw": float(sample.none_logit_raw),
+                "selected_action_deterministic": bool(deterministic),
+                "measurement_quality_logit_penalty": float(
+                    sample.measurement_quality_logit_penalty
+                ),
+                "quality_actor_branch": self.policy._measurement_branch_name(),
+                "measurement_proxy_features_enabled": bool(
+                    self.config.use_measurement_proxy_features
+                ),
+                "measurement_proxy_guidance_enabled": bool(
+                    self.config.measurement_proxy_guidance_enabled
+                ),
+                "measurement_proxy_teacher_coef": float(
+                    self.config.measurement_proxy_teacher_coef
+                ),
+                "measurement_proxy_temperature": float(
+                    self.config.measurement_proxy_temperature
+                ),
+                "measurement_proxy_communication_cost_weight": float(
+                    self.config.measurement_proxy_communication_cost_weight
+                ),
+                "measurement_proxy_gain": sample.measurement_proxy_gain.tolist(),
+                "measurement_proxy_cost": sample.measurement_proxy_cost.tolist(),
+                "measurement_proxy_valid": sample.measurement_proxy_valid.tolist(),
+                "measurement_proxy_utility": sample.measurement_proxy_utility.tolist(),
+                "measurement_persistent_proxy_features_enabled": bool(
+                    self.config.use_measurement_persistent_proxy_features
+                ),
+                "measurement_persistent_proxy_guidance_enabled": bool(
+                    self.config.measurement_persistent_proxy_guidance_enabled
+                ),
+                "measurement_persistent_proxy_horizon": int(
+                    self.config.measurement_persistent_proxy_horizon
+                ),
+                "persistent_proxy_gain": sample.persistent_proxy_gain.tolist(),
+                "persistent_proxy_cost": sample.persistent_proxy_cost.tolist(),
+                "persistent_proxy_valid": sample.persistent_proxy_valid.tolist(),
+                "persistent_proxy_utility": sample.persistent_proxy_utility.tolist(),
+                "quality_feature_enabled": bool(self.config.use_measurement_quality_features),
+                "measurement_budget_feature_enabled": bool(
+                    self.config.use_measurement_budget_features
+                ),
+                "measurement_rate_constraint_enabled": bool(
+                    self.config.measurement_rate_constraint_enabled
+                ),
+                "measurement_rate_target": float(
+                    (self.config.measurement_rate_target_by_uav or {}).get(uav_id, 0.0)
+                ),
+                "measurement_budget_remaining_ratio": float(
+                    decision_observation.get("measurement_budget_remaining_ratio", 1.0)
+                ),
+                "candidate_quality_valid_count": float(
+                    np.asarray(
+                        decision_observation.get("measurement_quality_valid", []), dtype=np.float32
+                    ).sum()
+                ) if self.config.use_measurement_quality_features else 0.0,
+            }
+            for uav_id, sample in samples.items()
+            for decision_observation in [normalized.get(uav_id, {})]
+        }
+        for uav_id, navigation in navigation_diagnostics.items():
+            measurement_diagnostics.setdefault(uav_id, {}).update(navigation)
+            measurement_diagnostics[uav_id].update(
+                {
+                    "motion_action_mode": "fixed_navigation_comm_v1",
+                    "learned_motion_dim": 0,
+                    "requested_nav": np.asarray(
+                        navigation.get("requested_delta_v", np.empty(0)), dtype=np.float32
+                    ).copy(),
+                    "link_selection": samples[uav_id].link_selection.copy(),
+                    "sampled_link_probabilities": samples[uav_id].sampled_link_probabilities.copy(),
+                    "links": samples[uav_id].link_selection.copy(),
+                    "probs": samples[uav_id].sampled_link_probabilities.copy(),
+                }
+            )
         return PolicyDecision(
             actions=actions,
             samples=samples,
@@ -2300,80 +2955,7 @@ class MAPPOTrainer:
             central_vector=central_vector.copy(),
             value=value,
             graph_traces=graph_traces,
-            measurement_diagnostics={
-                uav_id: {
-                    "measurement_probabilities": sample.measurement_probabilities.copy(),
-                    "selected_quality_risk": float(sample.selected_quality_risk),
-                    "selected_quality_valid": float(sample.selected_quality_valid),
-                    "measurement_logits_raw": sample.measurement_logits_raw.copy(),
-                    "measurement_quality_penalty": sample.measurement_quality_penalty.copy(),
-                    "measurement_logits_adjusted": sample.measurement_logits_adjusted.copy(),
-                    "candidate_source_ids": list(sample.candidate_source_ids),
-                    "candidate_visible": sample.candidate_visible.copy(),
-                    "candidate_action_mask": sample.candidate_action_mask.copy(),
-                    "candidate_action_features": sample.candidate_action_features.copy(),
-                    "candidate_quality_scores": sample.candidate_quality_scores.copy(),
-                    "none_context_summary": sample.none_context_summary.copy(),
-                    "none_logit_raw": float(sample.none_logit_raw),
-                    "selected_action_deterministic": bool(deterministic),
-                    "measurement_quality_logit_penalty": float(
-                        sample.measurement_quality_logit_penalty
-                    ),
-                    "quality_actor_branch": self.policy._measurement_branch_name(),
-                    "measurement_proxy_features_enabled": bool(
-                        self.config.use_measurement_proxy_features
-                    ),
-                    "measurement_proxy_guidance_enabled": bool(
-                        self.config.measurement_proxy_guidance_enabled
-                    ),
-                    "measurement_proxy_teacher_coef": float(
-                        self.config.measurement_proxy_teacher_coef
-                    ),
-                    "measurement_proxy_temperature": float(
-                        self.config.measurement_proxy_temperature
-                    ),
-                    "measurement_proxy_communication_cost_weight": float(
-                        self.config.measurement_proxy_communication_cost_weight
-                    ),
-                    "measurement_proxy_gain": sample.measurement_proxy_gain.tolist(),
-                    "measurement_proxy_cost": sample.measurement_proxy_cost.tolist(),
-                    "measurement_proxy_valid": sample.measurement_proxy_valid.tolist(),
-                     "measurement_proxy_utility": sample.measurement_proxy_utility.tolist(),
-                    "measurement_persistent_proxy_features_enabled": bool(
-                        self.config.use_measurement_persistent_proxy_features
-                    ),
-                    "measurement_persistent_proxy_guidance_enabled": bool(
-                        self.config.measurement_persistent_proxy_guidance_enabled
-                    ),
-                    "measurement_persistent_proxy_horizon": int(
-                        self.config.measurement_persistent_proxy_horizon
-                    ),
-                    "persistent_proxy_gain": sample.persistent_proxy_gain.tolist(),
-                    "persistent_proxy_cost": sample.persistent_proxy_cost.tolist(),
-                    "persistent_proxy_valid": sample.persistent_proxy_valid.tolist(),
-                    "persistent_proxy_utility": sample.persistent_proxy_utility.tolist(),
-                    "quality_feature_enabled": bool(self.config.use_measurement_quality_features),
-                    "measurement_budget_feature_enabled": bool(
-                        self.config.use_measurement_budget_features
-                    ),
-                    "measurement_rate_constraint_enabled": bool(
-                        self.config.measurement_rate_constraint_enabled
-                    ),
-                    "measurement_rate_target": float(
-                        (self.config.measurement_rate_target_by_uav or {}).get(uav_id, 0.0)
-                    ),
-                    "measurement_budget_remaining_ratio": float(
-                        decision_observation.get("measurement_budget_remaining_ratio", 1.0)
-                    ),
-                    "candidate_quality_valid_count": float(
-                        np.asarray(
-                            decision_observation.get("measurement_quality_valid", []), dtype=np.float32
-                        ).sum()
-                    ) if self.config.use_measurement_quality_features else 0.0,
-                }
-                for uav_id, sample in samples.items()
-                for decision_observation in [normalized.get(uav_id, {})]
-            },
+            measurement_diagnostics=measurement_diagnostics,
         )
 
     def add_transition(
@@ -2429,6 +3011,177 @@ class MAPPOTrainer:
             applied_bandwidth = {}
         if not isinstance(execution, Mapping):
             execution = {}
+        if self.config.motion_action_mode == "fixed_navigation_comm_v1":
+            if self.config.communication_learning_scope == "measurement_only":
+                # In this scope ``PolicySample`` deliberately has empty
+                # learned communication arrays.  Reconciliation therefore
+                # resolves the requested fixed bandwidth from the concrete
+                # decision action mapping and records execution diagnostics
+                # without recomputing or changing the categorical log prob.
+                def action_bandwidth_vector(action: Mapping[str, Any]) -> np.ndarray:
+                    vector = np.zeros(self.config.uav_count, dtype=np.float32)
+                    allocations = action.get("bandwidth", action.get("outgoing_bandwidth", {}))
+                    if isinstance(allocations, Mapping):
+                        for index, target in enumerate(self.policy.uav_ids):
+                            try:
+                                vector[index] = float(allocations.get(target, 0.0))
+                            except (TypeError, ValueError):
+                                vector[index] = 0.0
+                    return vector
+
+                def navigation_vector(value: Any) -> np.ndarray:
+                    if value is None:
+                        return np.empty(0, dtype=np.float32)
+                    try:
+                        vector = np.asarray(value, dtype=np.float32).reshape(-1)
+                    except (TypeError, ValueError):
+                        return np.empty(0, dtype=np.float32)
+                    return vector.copy() if vector.size else np.empty(0, dtype=np.float32)
+
+                for uav_id, sample in decision.samples.items():
+                    requested_action = decision.actions.get(uav_id, {})
+                    if not isinstance(requested_action, Mapping):
+                        requested_action = {}
+                    applied = executed_actions.get(uav_id, requested_action)
+                    if not isinstance(applied, Mapping):
+                        applied = {}
+                    selected = str(applied.get("measurement_uav_id", "none"))
+                    try:
+                        measurement_index = self.policy.uav_ids.index(selected)
+                    except ValueError:
+                        measurement_index = self.config.uav_count
+                    requested_bandwidth = action_bandwidth_vector(requested_action)
+                    allocations = applied_bandwidth.get(uav_id, {})
+                    if not isinstance(allocations, Mapping):
+                        allocations = applied.get("bandwidth", applied.get("outgoing_bandwidth", {}))
+                    executed_bandwidth = np.zeros(self.config.uav_count, dtype=np.float32)
+                    if isinstance(allocations, Mapping):
+                        for index, target in enumerate(self.policy.uav_ids):
+                            try:
+                                executed_bandwidth[index] = float(allocations.get(target, 0.0))
+                            except (TypeError, ValueError):
+                                executed_bandwidth[index] = 0.0
+                    requested_link = requested_bandwidth > 0.0
+                    executed_link = executed_bandwidth > 0.0
+                    applied_execution = execution.get(uav_id, {})
+                    if not isinstance(applied_execution, Mapping):
+                        applied_execution = {}
+                    diagnostics = decision.measurement_diagnostics.get(uav_id, {})
+                    requested_nav = navigation_vector(
+                        diagnostics.get("requested_nav", requested_action.get("delta_v"))
+                    )
+                    if "delta_v_applied" in applied_execution:
+                        executed_nav = navigation_vector(applied_execution["delta_v_applied"])
+                    else:
+                        executed_nav = navigation_vector(applied.get("delta_v", requested_nav))
+                    communication_changed = bool(
+                        int(measurement_index) != int(sample.measurement_index)
+                        or not np.allclose(
+                            requested_bandwidth,
+                            executed_bandwidth,
+                            atol=1e-6,
+                            rtol=1e-6,
+                        )
+                        or not np.array_equal(requested_link, executed_link)
+                    )
+                    nav_projection_changed = bool(
+                        requested_nav.shape != executed_nav.shape
+                        or not np.allclose(
+                            requested_nav,
+                            executed_nav,
+                            atol=1e-6,
+                            rtol=1e-6,
+                        )
+                    )
+                    sample.executed_measurement_index = int(measurement_index)
+                    sample.executed_bandwidth = executed_bandwidth.copy()
+                    sample.executed_delta_v = executed_nav.copy()
+                    sample.executed_link_selection = executed_link.copy()
+                    sample.action_execution_changed = communication_changed
+                    decision.measurement_diagnostics.setdefault(uav_id, {}).update(
+                        {
+                            "ppo_action_logprob_mode": self.config.ppo_action_logprob_mode,
+                            "sampled_measurement_index": int(sample.measurement_index),
+                            "executed_measurement_index": int(measurement_index),
+                            "sampled_bandwidth": requested_bandwidth.copy(),
+                            "executed_bandwidth": executed_bandwidth.copy(),
+                            "sampled_link_selection": requested_link.copy(),
+                            "executed_link_selection": executed_link.copy(),
+                            "sampled_delta_v": np.empty(0, dtype=np.float32),
+                            "executed_delta_v": executed_nav.copy(),
+                            "action_execution_changed": int(communication_changed),
+                            "nav_projection_changed": int(nav_projection_changed),
+                        }
+                    )
+                return
+            for uav_id, sample in decision.samples.items():
+                applied = executed_actions.get(uav_id, decision.actions.get(uav_id, {}))
+                if not isinstance(applied, Mapping):
+                    applied = {}
+                selected = str(applied.get("measurement_uav_id", "none"))
+                try:
+                    measurement_index = self.policy.uav_ids.index(selected)
+                except ValueError:
+                    measurement_index = self.config.uav_count
+                allocations = applied_bandwidth.get(uav_id, {})
+                if not isinstance(allocations, Mapping):
+                    allocations = applied.get("bandwidth", {})
+                executed_bandwidth = np.zeros(self.config.uav_count, dtype=np.float32)
+                if isinstance(allocations, Mapping):
+                    for index, target in enumerate(self.policy.uav_ids):
+                        try:
+                            executed_bandwidth[index] = float(allocations.get(target, 0.0))
+                        except (TypeError, ValueError):
+                            executed_bandwidth[index] = 0.0
+                executed_link = executed_bandwidth > 0.0
+                requested_bandwidth = np.asarray(sample.bandwidth, dtype=np.float32).reshape(-1)
+                requested_link = np.asarray(sample.link_selection, dtype=bool).reshape(-1)
+                applied_execution = execution.get(uav_id, {})
+                if not isinstance(applied_execution, Mapping):
+                    applied_execution = {}
+                requested_nav = np.asarray(
+                    decision.measurement_diagnostics.get(uav_id, {}).get(
+                        "requested_nav", decision.actions.get(uav_id, {}).get("delta_v", [0.0, 0.0, 0.0])
+                    ),
+                    dtype=np.float32,
+                ).reshape(3)
+                if "delta_v_applied" in applied_execution:
+                    executed_delta_v = np.asarray(applied_execution["delta_v_applied"], dtype=np.float32).reshape(3)
+                else:
+                    executed_delta_v = np.asarray(
+                        applied.get("delta_v", requested_nav), dtype=np.float32
+                    ).reshape(3)
+                communication_changed = bool(
+                    int(measurement_index) != int(sample.measurement_index)
+                    or requested_bandwidth.shape != executed_bandwidth.shape
+                    or not np.allclose(requested_bandwidth, executed_bandwidth, atol=1e-6, rtol=1e-6)
+                    or requested_link.shape != executed_link.shape
+                    or not np.array_equal(requested_link, executed_link)
+                )
+                nav_projection_changed = bool(
+                    not np.allclose(requested_nav, executed_delta_v, atol=1e-6, rtol=1e-6)
+                )
+                sample.executed_measurement_index = int(measurement_index)
+                sample.executed_bandwidth = executed_bandwidth.copy()
+                sample.executed_delta_v = executed_delta_v.copy()
+                sample.executed_link_selection = executed_link.copy()
+                sample.action_execution_changed = communication_changed
+                decision.measurement_diagnostics.setdefault(uav_id, {}).update(
+                    {
+                        "ppo_action_logprob_mode": self.config.ppo_action_logprob_mode,
+                        "sampled_measurement_index": int(sample.measurement_index),
+                        "executed_measurement_index": int(measurement_index),
+                        "sampled_bandwidth": requested_bandwidth.copy(),
+                        "executed_bandwidth": executed_bandwidth.copy(),
+                        "sampled_link_selection": requested_link.copy(),
+                        "executed_link_selection": executed_link.copy(),
+                        "sampled_delta_v": np.empty(0, dtype=np.float32),
+                        "executed_delta_v": executed_delta_v.copy(),
+                        "action_execution_changed": int(communication_changed),
+                        "nav_projection_changed": int(nav_projection_changed),
+                    }
+                )
+            return
         for uav_id, sample in decision.samples.items():
             applied = executed_actions.get(uav_id, decision.actions.get(uav_id, {}))
             if not isinstance(applied, Mapping):
@@ -2527,6 +3280,7 @@ class MAPPOTrainer:
             edge_feature_dim=self.config.edge_feature_dim,
             max_obstacles=self.config.max_obstacles,
             include_remaining_time=self.config.include_remaining_time,
+            critic_measurement_budget_features=self.config.critic_measurement_budget_features,
         )
         vector = self.central_normalizer.transform(vector)
         with torch.no_grad():

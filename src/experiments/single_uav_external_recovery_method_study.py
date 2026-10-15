@@ -680,9 +680,9 @@ def run_external_recovery_method_study(
     plots_root: str | Path = DEFAULT_PLOT_ROOT,
     smoke: bool = False,
     progress: bool = True,
+    goal_recovery_correction_enabled: bool | None = None,
 ) -> dict[str, Any]:
     """Run Teacher audit, then only proceed to BC/DAgger if Teacher passes."""
-
     data_root = Path(data_root)
     logs_root = Path(logs_root)
     plots_root = Path(plots_root)
@@ -747,6 +747,10 @@ def run_external_recovery_method_study(
             "teacher_truth_state_read_for_control": False,
             "reward_or_environment_modified": False,
             "ppo_updates": 0,
+            "goal_recovery_correction_runtime_override": (
+                goal_recovery_correction_enabled
+            ),
+            "goal_recovery_correction_evaluation_only": True,
             "old_outputs_overwritten": False,
         },
         "files": {
@@ -768,6 +772,7 @@ def run_external_recovery_method_study(
             smoke=smoke,
             progress=progress,
             oracle_factory=SoftFusionRecoveryOracleController,
+            goal_recovery_correction_enabled=goal_recovery_correction_enabled,
         )
         summary["dagger_bc"] = run_result
         summary["status"] = "completed"
@@ -821,6 +826,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--plots-root", type=Path, default=DEFAULT_PLOT_ROOT)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--quiet", action="store_true")
+    correction_group = parser.add_mutually_exclusive_group()
+    correction_group.add_argument(
+        "--goal-recovery-correction",
+        dest="goal_recovery_correction_enabled",
+        action="store_true",
+        help="enable Goal Recovery Correction during frozen Actor evaluation",
+    )
+    correction_group.add_argument(
+        "--no-goal-recovery-correction",
+        dest="goal_recovery_correction_enabled",
+        action="store_false",
+        help="force Goal Recovery Correction off during frozen Actor evaluation",
+    )
+    parser.set_defaults(goal_recovery_correction_enabled=None)
     args = parser.parse_args(argv)
     result = run_external_recovery_method_study(
         baseline_checkpoint=args.baseline_checkpoint,
@@ -829,6 +848,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         plots_root=args.plots_root,
         smoke=args.smoke,
         progress=not args.quiet,
+        goal_recovery_correction_enabled=args.goal_recovery_correction_enabled,
     )
     print(json.dumps(_jsonable(result), ensure_ascii=False, indent=2))
     return 0

@@ -268,6 +268,37 @@ class FormalExperimentConfig:
     single_uav_terminal_target_velocity_vector_reward_coef: float = 0.0
     single_uav_terminal_target_velocity_vector_radial_gate_enabled: bool = False
     single_uav_braking_safety_projection_enabled: bool = False
+    # Optional external low-level post-bypass guidance.  This is deliberately
+    # disabled in every historical/checkpoint-loaded configuration and never
+    # changes the Actor observation or a learning target.
+    goal_recovery_correction_enabled: bool = False
+    goal_recovery_radial_gain: float = 0.8
+    goal_recovery_tangential_gain: float = 0.7
+    goal_recovery_max_delta_v_mps: float = 0.6
+    goal_recovery_activation_mode: str = "post_bypass_only"
+    goal_recovery_alpha_ramp_enabled: bool = True
+    goal_recovery_terminal_capture_enabled: bool = False
+    goal_recovery_terminal_capture_radius_m: float = 8.0
+    goal_recovery_terminal_radial_speed_floor_mps: float = 0.25
+    goal_recovery_terminal_radial_brake_gain: float = 0.8
+    goal_recovery_terminal_tangential_gain: float = 1.0
+    goal_recovery_terminal_propulsion_fade_enabled: bool = True
+    goal_recovery_terminal_smooth_blend: bool = True
+    goal_recovery_terminal_capture_v2_enabled: bool = False
+    goal_recovery_terminal_effective_deceleration_mps2: float = 1.697726
+    goal_recovery_terminal_stopping_margin_m: float = 1.328009
+    goal_recovery_terminal_hold_inside_goal_enabled: bool = True
+    goal_recovery_terminal_radial_conflict_arbitration_enabled: bool = False
+    goal_recovery_terminal_radial_conflict_compensation_gain: float = 1.0
+    # v2.2 adds a hysteretic, restorative terminal hold.  It is deliberately
+    # opt-in so every pre-v2.2 checkpoint/evaluation keeps its old behavior.
+    goal_recovery_terminal_capture_v22_enabled: bool = False
+    goal_recovery_terminal_hold_enter_radius_m: float = 0.98
+    goal_recovery_terminal_hold_release_radius_m: float = 1.05
+    goal_recovery_terminal_hold_restorative_enabled: bool = True
+    # v2.3 target-radius guard; opt-in and behavior-neutral by default.
+    goal_recovery_terminal_capture_v23_enabled: bool = False
+    goal_recovery_terminal_hold_target_radius_m: float = 0.96
     # Optional training-only curriculum for the local braking skill.  It
     # changes neither the generated geometry nor validation/test starts; a
     # fraction of training episodes starts at 3/5/8 m with a controlled
@@ -628,6 +659,124 @@ class FormalExperimentConfig:
         ):
             raise ValueError(
                 "single_uav_braking_safety_projection_enabled must be boolean"
+            )
+        if not isinstance(self.goal_recovery_correction_enabled, bool):
+            raise ValueError("goal_recovery_correction_enabled must be boolean")
+        if self.goal_recovery_activation_mode != "post_bypass_only":
+            raise ValueError(
+                "goal_recovery_activation_mode must be post_bypass_only"
+            )
+        if not isinstance(self.goal_recovery_alpha_ramp_enabled, bool):
+            raise ValueError("goal_recovery_alpha_ramp_enabled must be boolean")
+        for name in (
+            "goal_recovery_terminal_capture_enabled",
+            "goal_recovery_terminal_propulsion_fade_enabled",
+            "goal_recovery_terminal_smooth_blend",
+            "goal_recovery_terminal_capture_v2_enabled",
+            "goal_recovery_terminal_hold_inside_goal_enabled",
+            "goal_recovery_terminal_radial_conflict_arbitration_enabled",
+            "goal_recovery_terminal_capture_v22_enabled",
+            "goal_recovery_terminal_hold_restorative_enabled",
+            "goal_recovery_terminal_capture_v23_enabled",
+        ):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be boolean")
+        for name, value, strictly_positive in (
+            ("goal_recovery_radial_gain", self.goal_recovery_radial_gain, False),
+            (
+                "goal_recovery_tangential_gain",
+                self.goal_recovery_tangential_gain,
+                False,
+            ),
+            (
+                "goal_recovery_max_delta_v_mps",
+                self.goal_recovery_max_delta_v_mps,
+                True,
+            ),
+            (
+                "goal_recovery_terminal_capture_radius_m",
+                self.goal_recovery_terminal_capture_radius_m,
+                True,
+            ),
+            (
+                "goal_recovery_terminal_radial_speed_floor_mps",
+                self.goal_recovery_terminal_radial_speed_floor_mps,
+                False,
+            ),
+            (
+                "goal_recovery_terminal_radial_brake_gain",
+                self.goal_recovery_terminal_radial_brake_gain,
+                False,
+            ),
+            (
+                "goal_recovery_terminal_tangential_gain",
+                self.goal_recovery_terminal_tangential_gain,
+                False,
+            ),
+            (
+                "goal_recovery_terminal_effective_deceleration_mps2",
+                self.goal_recovery_terminal_effective_deceleration_mps2,
+                True,
+            ),
+            (
+                "goal_recovery_terminal_stopping_margin_m",
+                self.goal_recovery_terminal_stopping_margin_m,
+                False,
+            ),
+            (
+                "goal_recovery_terminal_radial_conflict_compensation_gain",
+                self.goal_recovery_terminal_radial_conflict_compensation_gain,
+                False,
+            ),
+            (
+                "goal_recovery_terminal_hold_enter_radius_m",
+                self.goal_recovery_terminal_hold_enter_radius_m,
+                False,
+            ),
+            (
+                "goal_recovery_terminal_hold_release_radius_m",
+                self.goal_recovery_terminal_hold_release_radius_m,
+                False,
+            ),
+            (
+                "goal_recovery_terminal_hold_target_radius_m",
+                self.goal_recovery_terminal_hold_target_radius_m,
+                False,
+            ),
+        ):
+            number = float(value)
+            if not np.isfinite(number) or number < 0.0 or (
+                strictly_positive and number <= 0.0
+            ):
+                qualifier = "positive" if strictly_positive else "non-negative"
+                raise ValueError(f"{name} must be finite and {qualifier}")
+        if (
+            float(self.goal_recovery_terminal_capture_radius_m)
+            <= float(self.single_uav_goal_threshold_m)
+        ):
+            raise ValueError(
+                "goal_recovery_terminal_capture_radius_m must exceed "
+                "single_uav_goal_threshold_m"
+            )
+        if not (
+            0.0
+            <= float(self.goal_recovery_terminal_hold_enter_radius_m)
+            <= float(self.single_uav_goal_threshold_m)
+            < float(self.goal_recovery_terminal_hold_release_radius_m)
+        ):
+            raise ValueError(
+                "goal recovery terminal hold radii must satisfy "
+                "0 <= enter <= single_uav_goal_threshold_m < release"
+            )
+        if not (
+            0.0
+            <= float(self.goal_recovery_terminal_hold_target_radius_m)
+            < float(self.goal_recovery_terminal_hold_enter_radius_m)
+            < float(self.goal_recovery_terminal_hold_release_radius_m)
+        ):
+            raise ValueError(
+                "goal recovery terminal target, enter, and release radii must "
+                "satisfy 0 <= target < enter < release"
             )
         if not isinstance(
             self.single_uav_terminal_target_velocity_vector_radial_gate_enabled,

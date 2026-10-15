@@ -26,6 +26,13 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
+from ..control.goal_recovery_correction import (
+    GoalRecoveryCorrection,
+    GoalRecoveryCorrectionConfig,
+    compute_desired_goal_speed,
+    decompose_goal_relative_motion,
+    fuse_actor_action,
+)
 from ..schema import validate_episode_benchmark
 from ..simulation.motion_model import apply_velocity_increment
 from ..synthetic.episode_generator import _jsonable, _sha256, _write_json
@@ -638,6 +645,7 @@ def _rollout_episode(
     include_demo: bool,
     evaluation_stage: str,
     oracle_factory: Any | None = None,
+    goal_recovery_correction_enabled: bool | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     reset_seed = int(item["noise_seed"])
     _seed_everything(reset_seed)
@@ -649,6 +657,30 @@ def _rollout_episode(
     )
     scenario = copy.deepcopy(dict(item["scenario"]))
     observations, info = environment.reset(seed=reset_seed, scenario_config=scenario)
+    effective_goal_recovery_enabled = (
+        bool(config.goal_recovery_correction_enabled)
+        if goal_recovery_correction_enabled is None
+        else bool(goal_recovery_correction_enabled)
+    )
+    goal_recovery = GoalRecoveryCorrection(
+        GoalRecoveryCorrectionConfig(
+            enabled=effective_goal_recovery_enabled,
+            radial_gain=float(config.goal_recovery_radial_gain),
+            tangential_gain=float(config.goal_recovery_tangential_gain),
+            max_delta_v_mps=float(config.goal_recovery_max_delta_v_mps),
+            activation_mode=str(config.goal_recovery_activation_mode),
+            alpha_ramp_enabled=bool(config.goal_recovery_alpha_ramp_enabled),
+            max_acceleration_mps2=float(environment.config.motion.max_acceleration_mps2),
+            goal_threshold_m=float(config.single_uav_goal_threshold_m),
+            minimum_goal_speed_mps=0.35,
+            cruise_speed_mps=float(
+                min(
+                    environment.config.motion.max_speed_mps,
+                    config.single_uav_target_speed_far_mps,
+                )
+            ),
+        )
+    )
     episode_id = str(item["episode_id"])
     writer = _EpisodeTraceWriter(
         episode_root=trace_root / str(item["split"]) / episode_id,
@@ -742,6 +774,129 @@ def _rollout_episode(
                 }
                 teacher_query = False
             student_closed_loop = True
+        # Goal recovery is an evaluation-time external control layer, not a
+        # Teacher/DAgger label transform.  The cheap gates below structurally
+        # preserve the legacy action path unless estimated-state SoftFusion
+        # has latched a post-bypass release.
+        actor_raw_action = student_action.copy()
+        release_latched = bool(
+            teacher_control.get("soft_fusion_release_latched", False)
+        )
+        post_bypass_recovery_estimated = bool(
+            str(teacher_control.get("route_phase", ""))
+            == "post_bypass_recovery"
+        )
+        pass_progress_estimated = _finite(
+            teacher_control.get("soft_fusion_pass_progress"), float("nan")
+        )
+        correction_reason = "disabled"
+        correction_eligible = False
+        correction_active = False
+        correction_alpha = 0.0
+        correction_delta = np.zeros(3, dtype=float)
+        radial_correction_delta = np.zeros(3, dtype=float)
+        tangential_correction_delta = np.zeros(3, dtype=float)
+        goal_from_scenario = np.asarray(
+            scenario["goals"]["uav_00"], dtype=float
+        ).reshape(3)
+        diagnostic_motion = decompose_goal_relative_motion(
+            visible["position_m"],
+            visible["velocity_mps"],
+            goal_from_scenario,
+        )
+        goal_direction_estimated = diagnostic_motion.goal_direction.copy()
+        tangential_velocity_estimated = (
+            diagnostic_motion.current_tangential_velocity_vector_mps.copy()
+        )
+        goal_distance_estimated = float(diagnostic_motion.goal_distance_m)
+        current_radial_velocity_estimated = float(
+            diagnostic_motion.current_radial_velocity_mps
+        )
+        current_tangential_velocity_estimated = float(
+            diagnostic_motion.current_tangential_velocity_mps
+        )
+        desired_radial_velocity_estimated = (
+            compute_desired_goal_speed(
+                goal_distance_estimated,
+                max_acceleration_mps2=float(
+                    environment.config.motion.max_acceleration_mps2
+                ),
+                goal_threshold_m=float(config.single_uav_goal_threshold_m),
+                minimum_speed_mps=0.35,
+                cruise_speed_mps=float(
+                    min(
+                        environment.config.motion.max_speed_mps,
+                        config.single_uav_target_speed_far_mps,
+                    )
+                ),
+            )
+            if diagnostic_motion.valid
+            else 0.0
+        )
+        correction_norm_limited = False
+        action_transform_applied = False
+        corrected_pre_transform = actor_raw_action.copy()
+        if effective_goal_recovery_enabled:
+            if collection_mode != "evaluation":
+                correction_reason = "non_evaluation_action"
+            elif not release_latched:
+                correction_reason = "bypass_not_released"
+            elif not post_bypass_recovery_estimated:
+                correction_reason = "not_post_bypass_recovery"
+            else:
+                correction = goal_recovery.compute(
+                    estimated_position_m=visible["position_m"],
+                    estimated_velocity_mps=visible["velocity_mps"],
+                    goal_position_m=goal_from_scenario,
+                    release_latched=release_latched,
+                    post_bypass_recovery=post_bypass_recovery_estimated,
+                    pass_progress=pass_progress_estimated,
+                    action_provenance="evaluation",
+                )
+                fusion = fuse_actor_action(
+                    actor_raw_action,
+                    correction,
+                    lambda value: actor_action_transform(
+                        value,
+                        float(
+                            environment.config.motion.max_acceleration_mps2
+                            * environment.config.motion.dt_s
+                        ),
+                    ),
+                )
+                student_action = fusion.corrected_delta_v_pre_safety_mps.copy()
+                corrected_pre_transform = (
+                    fusion.corrected_delta_v_pre_action_transform_mps.copy()
+                )
+                correction_reason = correction.activation_reason
+                correction_eligible = bool(correction.eligible)
+                correction_active = bool(correction.active)
+                correction_alpha = float(correction.correction_alpha)
+                correction_delta = correction.correction_delta_v_mps.copy()
+                radial_correction_delta = (
+                    correction.radial_correction_delta_v_mps.copy()
+                )
+                tangential_correction_delta = (
+                    correction.tangential_correction_delta_v_mps.copy()
+                )
+                goal_direction_estimated = correction.goal_direction.copy()
+                tangential_velocity_estimated = (
+                    correction.current_tangential_velocity_vector_mps.copy()
+                )
+                goal_distance_estimated = float(correction.goal_distance_m)
+                current_radial_velocity_estimated = float(
+                    correction.current_radial_velocity_mps
+                )
+                current_tangential_velocity_estimated = float(
+                    correction.current_tangential_velocity_mps
+                )
+                desired_radial_velocity_estimated = float(
+                    correction.desired_radial_velocity_mps
+                )
+                correction_norm_limited = bool(
+                    correction.correction_norm_limited
+                )
+                action_transform_applied = bool(fusion.transform_applied)
         _assert_action_feasible(environment, {"uav_00": {"delta_v": student_action.tolist()}})
         nominal_state, _ = apply_velocity_increment(
             state_before,
@@ -861,6 +1016,69 @@ def _rollout_episode(
                 ),
                 "teacher_action_componentwise_legal": int(
                     teacher_control.get("teacher_action_componentwise_legal", 1) or 0
+                ),
+                "actor_raw_delta_v_mps": actor_raw_action.tolist(),
+                "actor_raw_delta_v_norm_mps": float(
+                    np.linalg.norm(actor_raw_action)
+                ),
+                "raw_actor_delta_v_x_mps": float(actor_raw_action[0]),
+                "raw_actor_delta_v_y_mps": float(actor_raw_action[1]),
+                "raw_actor_delta_v_z_mps": float(actor_raw_action[2]),
+                "goal_correction_enabled": int(
+                    effective_goal_recovery_enabled
+                ),
+                "goal_correction_active": int(correction_active),
+                "goal_correction_eligible": int(correction_eligible),
+                "goal_correction_activation_reason": correction_reason,
+                "goal_correction_alpha": float(correction_alpha),
+                "goal_correction_delta_v_mps": correction_delta.tolist(),
+                "goal_correction_norm_mps": float(
+                    np.linalg.norm(correction_delta)
+                ),
+                "goal_correction_radial_delta_v_mps": (
+                    radial_correction_delta.tolist()
+                ),
+                "goal_correction_tangential_delta_v_mps": (
+                    tangential_correction_delta.tolist()
+                ),
+                "goal_correction_norm_limited": int(correction_norm_limited),
+                "goal_correction_action_transform_applied": int(
+                    action_transform_applied
+                ),
+                "corrected_delta_v_pre_action_transform_mps": (
+                    corrected_pre_transform.tolist()
+                ),
+                "corrected_delta_v_pre_safety_mps": student_action.tolist(),
+                "applied_delta_v_mps": np.asarray(
+                    execution.get("delta_v_applied", student_action), dtype=float
+                ).reshape(3).tolist(),
+                "goal_distance_m": goal_distance_estimated,
+                "desired_radial_velocity_mps": (
+                    desired_radial_velocity_estimated
+                ),
+                "current_radial_velocity_mps": (
+                    current_radial_velocity_estimated
+                ),
+                "current_tangential_velocity_mps": (
+                    current_tangential_velocity_estimated
+                ),
+                "current_tangential_velocity_vector_mps": (
+                    tangential_velocity_estimated.tolist()
+                ),
+                "goal_direction": goal_direction_estimated.tolist(),
+                "goal_correction_passed_obstacle": int(release_latched),
+                "goal_correction_post_bypass_recovery": int(
+                    post_bypass_recovery_estimated
+                ),
+                "goal_correction_pass_progress": pass_progress_estimated,
+                "safety_projection_applied": int(
+                    bool(execution.get("safety_projected", False))
+                ),
+                "boundary_projection_applied": int(
+                    bool(execution.get("boundary_projected", False))
+                ),
+                "goal_correction_state_source": (
+                    "ekf_estimated_position_velocity_plus_scenario_goal"
                 ),
                 "oracle_truth_state_read": int(bool(teacher_control.get("truth_state_read_for_control", False))),
                 "oracle_route_phase": str(teacher_control.get("route_phase", "")),
@@ -1370,6 +1588,7 @@ def _evaluate_roles(
     plots_root: Path,
     progress: bool,
     oracle_factory: Any | None = None,
+    goal_recovery_correction_enabled: bool | None = None,
 ) -> dict[str, Any]:
     all_summaries: list[dict[str, Any]] = []
     all_rows: list[dict[str, Any]] = []
@@ -1408,6 +1627,11 @@ def _evaluate_roles(
                     include_demo=False,
                     evaluation_stage=f"bc_only_{split}",
                     oracle_factory=oracle_factory,
+                    goal_recovery_correction_enabled=(
+                        goal_recovery_correction_enabled
+                        if role != "oracle_teacher"
+                        else False
+                    ),
                 )
                 summary["evaluation_family"] = split
                 role_summaries.append(summary)
@@ -1581,6 +1805,7 @@ def run_static_obstacle_dagger_recovery_goal(
     smoke: bool = False,
     progress: bool = True,
     oracle_factory: Any | None = None,
+    goal_recovery_correction_enabled: bool | None = None,
 ) -> dict[str, Any]:
     """Run recollection, Actor-only BC and frozen normal/static evaluation."""
 
@@ -1825,6 +2050,7 @@ def run_static_obstacle_dagger_recovery_goal(
         plots_root=plots_root,
         progress=progress,
         oracle_factory=oracle_factory,
+        goal_recovery_correction_enabled=goal_recovery_correction_enabled,
     )
     source_hashes = {
         "baseline_original": {"path": str(baseline_path), "sha256": _sha256(baseline_path)},
@@ -1859,6 +2085,12 @@ def run_static_obstacle_dagger_recovery_goal(
             "ppo_updates": 0,
             "train_validation_pair_leakage": False,
             "teacher_truth_state_read_for_control": False,
+            "goal_recovery_correction_config_default": bool(
+                config.goal_recovery_correction_enabled
+            ),
+            "goal_recovery_correction_runtime_override": (
+                goal_recovery_correction_enabled
+            ),
             "validation_test_curriculum": False,
             "static_only": True,
             "stable_criterion_reused": True,
@@ -1888,6 +2120,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--plots-root", type=Path, default=DEFAULT_PLOT_ROOT)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--quiet", action="store_true")
+    correction_group = parser.add_mutually_exclusive_group()
+    correction_group.add_argument(
+        "--goal-recovery-correction",
+        dest="goal_recovery_correction_enabled",
+        action="store_true",
+        help="enable the estimated-state Goal Recovery Correction Layer during frozen evaluation",
+    )
+    correction_group.add_argument(
+        "--no-goal-recovery-correction",
+        dest="goal_recovery_correction_enabled",
+        action="store_false",
+        help="force the Goal Recovery Correction Layer off during frozen evaluation",
+    )
+    parser.set_defaults(goal_recovery_correction_enabled=None)
     args = parser.parse_args(argv)
     result = run_static_obstacle_dagger_recovery_goal(
         baseline_checkpoint=args.baseline_checkpoint,
@@ -1898,6 +2144,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         plots_root=args.plots_root,
         smoke=args.smoke,
         progress=not args.quiet,
+        goal_recovery_correction_enabled=args.goal_recovery_correction_enabled,
     )
     print(json.dumps(_jsonable(result), ensure_ascii=False, indent=2))
     return 0
