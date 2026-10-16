@@ -1,0 +1,25 @@
+{
+  "schema_version": "single_uav_static_ppo_smoke_v1",
+  "smoke_id": "single_uav_static_ppo_smoke_v1_seed2026",
+  "seed": 2026,
+  "baseline_config": "data/configs/single_uav_ppo_baseline_v1.json",
+  "baseline_config_sha256": "bd34f163de64fc814cd21f705029343c4c4d45efa0ff7ace8a3ef6acbf07c609",
+  "sources": {
+    "A": {
+      "checkpoint": "data/synthetic/single_uav_external_recovery_method_study_seed2026/dagger_bc/baseline_observation_migration/checkpoints/stage2a_observation_compatible_init.pt",
+      "sha256": "6561bf3cbfcf4036db1a13eb118190f415c10d6de3a0d988a85390b6e3b6bfdc"
+    },
+    "B": {
+      "checkpoint": "data/synthetic/single_uav_external_recovery_method_study_seed2026/dagger_bc/bc_final/scale_1/checkpoints/best_validation.pt",
+      "sha256": "b7ed3ba79cf3055906bd0425cf4a7c4e613b206a8680ebf17f3b586fbc31b3c6"
+    }
+  },
+  "data_root": "data/synthetic/single_uav_static_ppo_smoke_v1_seed2026",
+  "log_root": "logs/preliminary/single_uav_static_ppo_smoke_v1_seed2026",
+  "plot_root": "plots/preliminary/single_uav_static_ppo_smoke_v1_seed2026",
+  "calibration_steps_per_arm": 288,
+  "ppo_steps_per_arm": 2160,
+  "updates_per_arm": 18,
+  "rollout_steps": 120,
+  "curriculum_version": "single_uav_static_ppo_smoke_curriculum_v1"
+}

@@ -1,0 +1,46 @@
+{
+  "date": "2026-10-11",
+  "plan_version": 3,
+  "stem": "single_uav_fixed_navigation_v1_seed2026_20261011",
+  "data_root": "data\\synthetic\\single_uav_fixed_navigation_v1_seed2026_20261011",
+  "log_root": "logs\\preliminary\\single_uav_fixed_navigation_v1_seed2026_20261011",
+  "plot_root": "plots\\preliminary\\single_uav_fixed_navigation_v1_seed2026_20261011",
+  "baseline_config": "data/configs/single_uav_ppo_baseline_v1.json",
+  "frozen_environment_potential_statistics": "data/synthetic/single_uav_ppo_a_norm_transfer_v2_seed2026_20261011/full_train_statistics.json",
+  "controller": {
+    "position_gain_s_inv": 0.6,
+    "velocity_gain_s_inv": 1.6,
+    "cruise_speed_mps": 2.5,
+    "waypoint_radius_m": 0.8,
+    "max_delta_v_norm_mps": 0.6,
+    "dt_s": 0.2
+  },
+  "development_cases": 6,
+  "normal_evaluation_cases": 36,
+  "paired_fixed_cases": 4,
+  "paired_coast_cases": 4,
+  "optional_obstacle_cases": 4,
+  "maximum_research_env_steps": 6480,
+  "max_steps": 120,
+  "braking_evidence": {
+    "positive_toward_reference_speed_min_mps": 0.05,
+    "negative_command_projection_threshold_mps": 0.0001,
+    "actual_projected_speed_reduction_min_mps": 0.001,
+    "static_peak_speed_min_mps": 0.5,
+    "must_precede_first_qualifying_hold": true
+  },
+  "phase_mode_manifest": {
+    "development": "legacy safety distance 2 m, all five assists OFF",
+    "normal_evaluation": "legacy safety distance 2 m, all five assists OFF",
+    "paired_fixed": "legacy safety distance 2 m, all five assists OFF",
+    "paired_coast": "legacy safety distance 2 m, all five assists OFF",
+    "obstacle": "legacy safety distance 2 m, all five assists OFF"
+  },
+  "no_training": true,
+  "B_paused": true,
+  "known_static_mission_routes_only": true,
+  "no_commit_or_push": true,
+  "safety2_enabled": true,
+  "assist_mask": "00000",
+  "applied_vector_tolerance_mps": 1E-06
+}

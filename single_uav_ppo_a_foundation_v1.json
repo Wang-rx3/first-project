@@ -1,0 +1,48 @@
+{
+  "schema_version": "single_uav_ppo_a_foundation_v1",
+  "plan_version": 3,
+  "seed": 2026,
+  "baseline_config": "data/configs/single_uav_ppo_baseline_v1.json",
+  "baseline_config_sha256": "bd34f163de64fc814cd21f705029343c4c4d45efa0ff7ace8a3ef6acbf07c609",
+  "A_source": {
+    "checkpoint": "data/synthetic/single_uav_external_recovery_method_study_seed2026/dagger_bc/baseline_observation_migration/checkpoints/stage2a_observation_compatible_init.pt",
+    "sha256": "6561bf3cbfcf4036db1a13eb118190f415c10d6de3a0d988a85390b6e3b6bfdc"
+  },
+  "historical_A_initializer": {
+    "path": "data/synthetic/single_uav_static_ppo_smoke_v1_seed2026/A/initial.pt",
+    "sha256": "084c2ea3d053999949b1ca641c99504cdcabc1af9609e68dd7d66b8fbfeeba89"
+  },
+  "shared_A_train_statistics": {
+    "path": "data/synthetic/single_uav_static_ppo_smoke_v1_seed2026/shared_train_statistics.json",
+    "sha256": "2e66ce1ec1bc54745e9c4a08c1e3706f4cd2341c43dc14d98b0f04bbce71d533",
+    "reused_historical_A_calibration_steps": 288,
+    "new_calibration_steps": 0
+  },
+  "primary_arm": "P",
+  "diagnostic_control_arm": "G",
+  "B_status": "paused_preserved_no_model_load_or_training",
+  "normal_online_steps_per_arm": 720,
+  "normal_updates_per_arm": 6,
+  "rollout_steps": 120,
+  "conditional_single_online_steps": 720,
+  "conditional_full_online_steps": 720,
+  "maximum_online_ppo_steps": 2880,
+  "maximum_research_env_transitions": 16252,
+  "data_root": "data/synthetic/single_uav_ppo_a_foundation_v1_seed2026",
+  "log_root": "logs/preliminary/single_uav_ppo_a_foundation_v1_seed2026",
+  "plot_root": "plots/preliminary/single_uav_ppo_a_foundation_v1_seed2026",
+  "normal_release_gate": {
+    "train_success_min": 4,
+    "train_cases": 6,
+    "validation_success_min": 5,
+    "validation_cases": 8,
+    "collision_episodes_max": 0,
+    "physical_contact_steps_max": 0,
+    "boundary_attempt_and_execution_fraction_max": 0.01,
+    "validation_median_final_goal_distance_max_m": 2.0
+  },
+  "no_reward_coefficient_changes": true,
+  "no_multiseed_training": true,
+  "no_generalization_claim": true,
+  "no_commit_or_push": true
+}

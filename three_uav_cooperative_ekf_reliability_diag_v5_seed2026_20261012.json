@@ -1,0 +1,1663 @@
+{
+  "schema": "cooperative_ekf_reliability_diagnostic_v5",
+  "experiment_name": "three_uav_cooperative_ekf_reliability_diag_v5_seed2026_20261012",
+  "base_config": "data/configs/three_uav_measurement_learnability_v4_seed2026_20261012.json",
+  "base_config_sha256": "7d26438eb221a02318b5d39286d1291fed8ffacb3e9b51b725df617cc164195a",
+  "source_calibration": "calibration_v4_s2026",
+  "credit_scale": 0.0833348547377086,
+  "cases": [
+    {
+      "scene_id": "train_compact_x",
+      "split": "train",
+      "seed": 2026116100,
+      "requires_graph_change": false,
+      "scenario": {
+        "initial_positions": {
+          "uav_00": [
+            40.0,
+            40.0,
+            20.0
+          ],
+          "uav_01": [
+            40.0,
+            52.0,
+            20.0
+          ],
+          "uav_02": [
+            40.0,
+            46.0,
+            30.0
+          ]
+        },
+        "initial_velocities": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "initial_attitudes": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "goals": {
+          "uav_00": [
+            90.0,
+            40.0,
+            20.0
+          ],
+          "uav_01": [
+            90.0,
+            52.0,
+            20.0
+          ],
+          "uav_02": [
+            90.0,
+            46.0,
+            30.0
+          ]
+        },
+        "obstacles": [],
+        "obstacle_specs": []
+      },
+      "geometry_sha256": "f281c99d4593ef4344264df485600ae838f9f7078c7b591d740f47d9ccfd30c5"
+    },
+    {
+      "scene_id": "train_bridge_x",
+      "split": "train",
+      "seed": 2026116102,
+      "requires_graph_change": true,
+      "scenario": {
+        "initial_positions": {
+          "uav_00": [
+            35.0,
+            125.0,
+            24.0
+          ],
+          "uav_01": [
+            103.0,
+            125.0,
+            24.0
+          ],
+          "uav_02": [
+            69.0,
+            139.0,
+            34.0
+          ]
+        },
+        "initial_velocities": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "initial_attitudes": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "goals": {
+          "uav_00": [
+            80.0,
+            113.0,
+            24.0
+          ],
+          "uav_01": [
+            153.0,
+            137.0,
+            24.0
+          ],
+          "uav_02": [
+            119.0,
+            139.0,
+            34.0
+          ]
+        },
+        "obstacles": [],
+        "obstacle_specs": []
+      },
+      "geometry_sha256": "7b46a3e3ea48f760ba60534023f388aa56af5a1fde98fef1d2155cbe4de380cc"
+    }
+  ],
+  "seeds": [
+    2026116100,
+    2026116102
+  ],
+  "arms": [
+    "none",
+    "fixed",
+    "random_peer",
+    "greedy"
+  ],
+  "run_matrix": [
+    {
+      "scene_id": "train_bridge_x",
+      "scenario": {
+        "initial_positions": {
+          "uav_00": [
+            35.0,
+            125.0,
+            24.0
+          ],
+          "uav_01": [
+            103.0,
+            125.0,
+            24.0
+          ],
+          "uav_02": [
+            69.0,
+            139.0,
+            34.0
+          ]
+        },
+        "initial_velocities": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "initial_attitudes": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "goals": {
+          "uav_00": [
+            80.0,
+            113.0,
+            24.0
+          ],
+          "uav_01": [
+            153.0,
+            137.0,
+            24.0
+          ],
+          "uav_02": [
+            119.0,
+            139.0,
+            34.0
+          ]
+        },
+        "obstacles": [],
+        "obstacle_specs": []
+      },
+      "geometry_sha256": "7b46a3e3ea48f760ba60534023f388aa56af5a1fde98fef1d2155cbe4de380cc",
+      "seed": 2026116102,
+      "arm": "none",
+      "block_id": "train_bridge_x_s2026116102",
+      "run_index": 0
+    },
+    {
+      "scene_id": "train_bridge_x",
+      "scenario": {
+        "initial_positions": {
+          "uav_00": [
+            35.0,
+            125.0,
+            24.0
+          ],
+          "uav_01": [
+            103.0,
+            125.0,
+            24.0
+          ],
+          "uav_02": [
+            69.0,
+            139.0,
+            34.0
+          ]
+        },
+        "initial_velocities": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "initial_attitudes": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "goals": {
+          "uav_00": [
+            80.0,
+            113.0,
+            24.0
+          ],
+          "uav_01": [
+            153.0,
+            137.0,
+            24.0
+          ],
+          "uav_02": [
+            119.0,
+            139.0,
+            34.0
+          ]
+        },
+        "obstacles": [],
+        "obstacle_specs": []
+      },
+      "geometry_sha256": "7b46a3e3ea48f760ba60534023f388aa56af5a1fde98fef1d2155cbe4de380cc",
+      "seed": 2026116100,
+      "arm": "greedy",
+      "block_id": "train_bridge_x_s2026116100",
+      "run_index": 1
+    },
+    {
+      "scene_id": "train_compact_x",
+      "scenario": {
+        "initial_positions": {
+          "uav_00": [
+            40.0,
+            40.0,
+            20.0
+          ],
+          "uav_01": [
+            40.0,
+            52.0,
+            20.0
+          ],
+          "uav_02": [
+            40.0,
+            46.0,
+            30.0
+          ]
+        },
+        "initial_velocities": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "initial_attitudes": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "goals": {
+          "uav_00": [
+            90.0,
+            40.0,
+            20.0
+          ],
+          "uav_01": [
+            90.0,
+            52.0,
+            20.0
+          ],
+          "uav_02": [
+            90.0,
+            46.0,
+            30.0
+          ]
+        },
+        "obstacles": [],
+        "obstacle_specs": []
+      },
+      "geometry_sha256": "f281c99d4593ef4344264df485600ae838f9f7078c7b591d740f47d9ccfd30c5",
+      "seed": 2026116100,
+      "arm": "random_peer",
+      "block_id": "train_compact_x_s2026116100",
+      "run_index": 2
+    },
+    {
+      "scene_id": "train_bridge_x",
+      "scenario": {
+        "initial_positions": {
+          "uav_00": [
+            35.0,
+            125.0,
+            24.0
+          ],
+          "uav_01": [
+            103.0,
+            125.0,
+            24.0
+          ],
+          "uav_02": [
+            69.0,
+            139.0,
+            34.0
+          ]
+        },
+        "initial_velocities": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "initial_attitudes": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "goals": {
+          "uav_00": [
+            80.0,
+            113.0,
+            24.0
+          ],
+          "uav_01": [
+            153.0,
+            137.0,
+            24.0
+          ],
+          "uav_02": [
+            119.0,
+            139.0,
+            34.0
+          ]
+        },
+        "obstacles": [],
+        "obstacle_specs": []
+      },
+      "geometry_sha256": "7b46a3e3ea48f760ba60534023f388aa56af5a1fde98fef1d2155cbe4de380cc",
+      "seed": 2026116100,
+      "arm": "random_peer",
+      "block_id": "train_bridge_x_s2026116100",
+      "run_index": 3
+    },
+    {
+      "scene_id": "train_compact_x",
+      "scenario": {
+        "initial_positions": {
+          "uav_00": [
+            40.0,
+            40.0,
+            20.0
+          ],
+          "uav_01": [
+            40.0,
+            52.0,
+            20.0
+          ],
+          "uav_02": [
+            40.0,
+            46.0,
+            30.0
+          ]
+        },
+        "initial_velocities": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "initial_attitudes": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "goals": {
+          "uav_00": [
+            90.0,
+            40.0,
+            20.0
+          ],
+          "uav_01": [
+            90.0,
+            52.0,
+            20.0
+          ],
+          "uav_02": [
+            90.0,
+            46.0,
+            30.0
+          ]
+        },
+        "obstacles": [],
+        "obstacle_specs": []
+      },
+      "geometry_sha256": "f281c99d4593ef4344264df485600ae838f9f7078c7b591d740f47d9ccfd30c5",
+      "seed": 2026116102,
+      "arm": "fixed",
+      "block_id": "train_compact_x_s2026116102",
+      "run_index": 4
+    },
+    {
+      "scene_id": "train_bridge_x",
+      "scenario": {
+        "initial_positions": {
+          "uav_00": [
+            35.0,
+            125.0,
+            24.0
+          ],
+          "uav_01": [
+            103.0,
+            125.0,
+            24.0
+          ],
+          "uav_02": [
+            69.0,
+            139.0,
+            34.0
+          ]
+        },
+        "initial_velocities": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "initial_attitudes": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "goals": {
+          "uav_00": [
+            80.0,
+            113.0,
+            24.0
+          ],
+          "uav_01": [
+            153.0,
+            137.0,
+            24.0
+          ],
+          "uav_02": [
+            119.0,
+            139.0,
+            34.0
+          ]
+        },
+        "obstacles": [],
+        "obstacle_specs": []
+      },
+      "geometry_sha256": "7b46a3e3ea48f760ba60534023f388aa56af5a1fde98fef1d2155cbe4de380cc",
+      "seed": 2026116100,
+      "arm": "none",
+      "block_id": "train_bridge_x_s2026116100",
+      "run_index": 5
+    },
+    {
+      "scene_id": "train_bridge_x",
+      "scenario": {
+        "initial_positions": {
+          "uav_00": [
+            35.0,
+            125.0,
+            24.0
+          ],
+          "uav_01": [
+            103.0,
+            125.0,
+            24.0
+          ],
+          "uav_02": [
+            69.0,
+            139.0,
+            34.0
+          ]
+        },
+        "initial_velocities": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "initial_attitudes": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "goals": {
+          "uav_00": [
+            80.0,
+            113.0,
+            24.0
+          ],
+          "uav_01": [
+            153.0,
+            137.0,
+            24.0
+          ],
+          "uav_02": [
+            119.0,
+            139.0,
+            34.0
+          ]
+        },
+        "obstacles": [],
+        "obstacle_specs": []
+      },
+      "geometry_sha256": "7b46a3e3ea48f760ba60534023f388aa56af5a1fde98fef1d2155cbe4de380cc",
+      "seed": 2026116100,
+      "arm": "fixed",
+      "block_id": "train_bridge_x_s2026116100",
+      "run_index": 6
+    },
+    {
+      "scene_id": "train_compact_x",
+      "scenario": {
+        "initial_positions": {
+          "uav_00": [
+            40.0,
+            40.0,
+            20.0
+          ],
+          "uav_01": [
+            40.0,
+            52.0,
+            20.0
+          ],
+          "uav_02": [
+            40.0,
+            46.0,
+            30.0
+          ]
+        },
+        "initial_velocities": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "initial_attitudes": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "goals": {
+          "uav_00": [
+            90.0,
+            40.0,
+            20.0
+          ],
+          "uav_01": [
+            90.0,
+            52.0,
+            20.0
+          ],
+          "uav_02": [
+            90.0,
+            46.0,
+            30.0
+          ]
+        },
+        "obstacles": [],
+        "obstacle_specs": []
+      },
+      "geometry_sha256": "f281c99d4593ef4344264df485600ae838f9f7078c7b591d740f47d9ccfd30c5",
+      "seed": 2026116102,
+      "arm": "none",
+      "block_id": "train_compact_x_s2026116102",
+      "run_index": 7
+    },
+    {
+      "scene_id": "train_compact_x",
+      "scenario": {
+        "initial_positions": {
+          "uav_00": [
+            40.0,
+            40.0,
+            20.0
+          ],
+          "uav_01": [
+            40.0,
+            52.0,
+            20.0
+          ],
+          "uav_02": [
+            40.0,
+            46.0,
+            30.0
+          ]
+        },
+        "initial_velocities": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "initial_attitudes": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "goals": {
+          "uav_00": [
+            90.0,
+            40.0,
+            20.0
+          ],
+          "uav_01": [
+            90.0,
+            52.0,
+            20.0
+          ],
+          "uav_02": [
+            90.0,
+            46.0,
+            30.0
+          ]
+        },
+        "obstacles": [],
+        "obstacle_specs": []
+      },
+      "geometry_sha256": "f281c99d4593ef4344264df485600ae838f9f7078c7b591d740f47d9ccfd30c5",
+      "seed": 2026116102,
+      "arm": "greedy",
+      "block_id": "train_compact_x_s2026116102",
+      "run_index": 8
+    },
+    {
+      "scene_id": "train_bridge_x",
+      "scenario": {
+        "initial_positions": {
+          "uav_00": [
+            35.0,
+            125.0,
+            24.0
+          ],
+          "uav_01": [
+            103.0,
+            125.0,
+            24.0
+          ],
+          "uav_02": [
+            69.0,
+            139.0,
+            34.0
+          ]
+        },
+        "initial_velocities": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "initial_attitudes": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "goals": {
+          "uav_00": [
+            80.0,
+            113.0,
+            24.0
+          ],
+          "uav_01": [
+            153.0,
+            137.0,
+            24.0
+          ],
+          "uav_02": [
+            119.0,
+            139.0,
+            34.0
+          ]
+        },
+        "obstacles": [],
+        "obstacle_specs": []
+      },
+      "geometry_sha256": "7b46a3e3ea48f760ba60534023f388aa56af5a1fde98fef1d2155cbe4de380cc",
+      "seed": 2026116102,
+      "arm": "greedy",
+      "block_id": "train_bridge_x_s2026116102",
+      "run_index": 9
+    },
+    {
+      "scene_id": "train_compact_x",
+      "scenario": {
+        "initial_positions": {
+          "uav_00": [
+            40.0,
+            40.0,
+            20.0
+          ],
+          "uav_01": [
+            40.0,
+            52.0,
+            20.0
+          ],
+          "uav_02": [
+            40.0,
+            46.0,
+            30.0
+          ]
+        },
+        "initial_velocities": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "initial_attitudes": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "goals": {
+          "uav_00": [
+            90.0,
+            40.0,
+            20.0
+          ],
+          "uav_01": [
+            90.0,
+            52.0,
+            20.0
+          ],
+          "uav_02": [
+            90.0,
+            46.0,
+            30.0
+          ]
+        },
+        "obstacles": [],
+        "obstacle_specs": []
+      },
+      "geometry_sha256": "f281c99d4593ef4344264df485600ae838f9f7078c7b591d740f47d9ccfd30c5",
+      "seed": 2026116100,
+      "arm": "greedy",
+      "block_id": "train_compact_x_s2026116100",
+      "run_index": 10
+    },
+    {
+      "scene_id": "train_compact_x",
+      "scenario": {
+        "initial_positions": {
+          "uav_00": [
+            40.0,
+            40.0,
+            20.0
+          ],
+          "uav_01": [
+            40.0,
+            52.0,
+            20.0
+          ],
+          "uav_02": [
+            40.0,
+            46.0,
+            30.0
+          ]
+        },
+        "initial_velocities": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "initial_attitudes": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "goals": {
+          "uav_00": [
+            90.0,
+            40.0,
+            20.0
+          ],
+          "uav_01": [
+            90.0,
+            52.0,
+            20.0
+          ],
+          "uav_02": [
+            90.0,
+            46.0,
+            30.0
+          ]
+        },
+        "obstacles": [],
+        "obstacle_specs": []
+      },
+      "geometry_sha256": "f281c99d4593ef4344264df485600ae838f9f7078c7b591d740f47d9ccfd30c5",
+      "seed": 2026116102,
+      "arm": "random_peer",
+      "block_id": "train_compact_x_s2026116102",
+      "run_index": 11
+    },
+    {
+      "scene_id": "train_compact_x",
+      "scenario": {
+        "initial_positions": {
+          "uav_00": [
+            40.0,
+            40.0,
+            20.0
+          ],
+          "uav_01": [
+            40.0,
+            52.0,
+            20.0
+          ],
+          "uav_02": [
+            40.0,
+            46.0,
+            30.0
+          ]
+        },
+        "initial_velocities": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "initial_attitudes": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "goals": {
+          "uav_00": [
+            90.0,
+            40.0,
+            20.0
+          ],
+          "uav_01": [
+            90.0,
+            52.0,
+            20.0
+          ],
+          "uav_02": [
+            90.0,
+            46.0,
+            30.0
+          ]
+        },
+        "obstacles": [],
+        "obstacle_specs": []
+      },
+      "geometry_sha256": "f281c99d4593ef4344264df485600ae838f9f7078c7b591d740f47d9ccfd30c5",
+      "seed": 2026116100,
+      "arm": "fixed",
+      "block_id": "train_compact_x_s2026116100",
+      "run_index": 12
+    },
+    {
+      "scene_id": "train_bridge_x",
+      "scenario": {
+        "initial_positions": {
+          "uav_00": [
+            35.0,
+            125.0,
+            24.0
+          ],
+          "uav_01": [
+            103.0,
+            125.0,
+            24.0
+          ],
+          "uav_02": [
+            69.0,
+            139.0,
+            34.0
+          ]
+        },
+        "initial_velocities": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "initial_attitudes": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "goals": {
+          "uav_00": [
+            80.0,
+            113.0,
+            24.0
+          ],
+          "uav_01": [
+            153.0,
+            137.0,
+            24.0
+          ],
+          "uav_02": [
+            119.0,
+            139.0,
+            34.0
+          ]
+        },
+        "obstacles": [],
+        "obstacle_specs": []
+      },
+      "geometry_sha256": "7b46a3e3ea48f760ba60534023f388aa56af5a1fde98fef1d2155cbe4de380cc",
+      "seed": 2026116102,
+      "arm": "random_peer",
+      "block_id": "train_bridge_x_s2026116102",
+      "run_index": 13
+    },
+    {
+      "scene_id": "train_bridge_x",
+      "scenario": {
+        "initial_positions": {
+          "uav_00": [
+            35.0,
+            125.0,
+            24.0
+          ],
+          "uav_01": [
+            103.0,
+            125.0,
+            24.0
+          ],
+          "uav_02": [
+            69.0,
+            139.0,
+            34.0
+          ]
+        },
+        "initial_velocities": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "initial_attitudes": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "goals": {
+          "uav_00": [
+            80.0,
+            113.0,
+            24.0
+          ],
+          "uav_01": [
+            153.0,
+            137.0,
+            24.0
+          ],
+          "uav_02": [
+            119.0,
+            139.0,
+            34.0
+          ]
+        },
+        "obstacles": [],
+        "obstacle_specs": []
+      },
+      "geometry_sha256": "7b46a3e3ea48f760ba60534023f388aa56af5a1fde98fef1d2155cbe4de380cc",
+      "seed": 2026116102,
+      "arm": "fixed",
+      "block_id": "train_bridge_x_s2026116102",
+      "run_index": 14
+    },
+    {
+      "scene_id": "train_compact_x",
+      "scenario": {
+        "initial_positions": {
+          "uav_00": [
+            40.0,
+            40.0,
+            20.0
+          ],
+          "uav_01": [
+            40.0,
+            52.0,
+            20.0
+          ],
+          "uav_02": [
+            40.0,
+            46.0,
+            30.0
+          ]
+        },
+        "initial_velocities": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "initial_attitudes": {
+          "uav_00": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_01": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "uav_02": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "goals": {
+          "uav_00": [
+            90.0,
+            40.0,
+            20.0
+          ],
+          "uav_01": [
+            90.0,
+            52.0,
+            20.0
+          ],
+          "uav_02": [
+            90.0,
+            46.0,
+            30.0
+          ]
+        },
+        "obstacles": [],
+        "obstacle_specs": []
+      },
+      "geometry_sha256": "f281c99d4593ef4344264df485600ae838f9f7078c7b591d740f47d9ccfd30c5",
+      "seed": 2026116100,
+      "arm": "none",
+      "block_id": "train_compact_x_s2026116100",
+      "run_index": 15
+    }
+  ],
+  "horizon": 120,
+  "trajectory_transition_cap": 1920,
+  "branch_state_rule": "None arm, earliest two v4 open windows with exactly two legal peers for uav_00; never use outcome or truth in state selection",
+  "branch_choices": [
+    "B:uav_01",
+    "C:uav_02",
+    "none"
+  ],
+  "branch_transition_cap": 25,
+  "deterministic_replay_rule": "repeat B once at first available block in ordered scene_ids then seeds",
+  "total_transition_cap": 1945,
+  "initial_error_order": [
+    "position_x_m",
+    "position_y_m",
+    "position_z_m",
+    "velocity_x_mps",
+    "velocity_y_mps",
+    "velocity_z_mps"
+  ],
+  "initial_position_marginal_covariance": [
+    [
+      4.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      4.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      4.0
+    ]
+  ],
+  "initial_velocity_marginal_covariance": [
+    [
+      1.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      1.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "assumed_initial_position_correlation": 0.5,
+  "initial_cross_position_covariance": [
+    [
+      2.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      2.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      2.0
+    ]
+  ],
+  "correlation_interpretation": "diagnostic shared-reference hypothesis, not identified from v4 data",
+  "initial_errors_by_seed": {
+    "2026116100": {
+      "uav_00": [
+        -0.30948268608133983,
+        3.118191673215493,
+        -0.31686493799836796,
+        2.084944531121534,
+        -0.3555908796511195,
+        0.23957164504802045
+      ],
+      "uav_01": [
+        -0.5564342099693482,
+        3.3547049140199587,
+        -2.202821775078016,
+        0.9132219298148109,
+        -1.0403139565450008,
+        0.24286119914545443
+      ],
+      "uav_02": [
+        -1.1843759073112057,
+        1.8006807310030164,
+        0.29498214705456893,
+        -0.3101226334621258,
+        -0.5848226875121669,
+        0.4179162045200676
+      ]
+    },
+    "2026116102": {
+      "uav_00": [
+        3.3814278552786963,
+        -1.6179692429061145,
+        0.8112131858389011,
+        0.032969834851329635,
+        -0.6882756977840552,
+        0.5425231033570364
+      ],
+      "uav_01": [
+        2.73460379182729,
+        -2.154326590630978,
+        0.1420370801453232,
+        0.8766348119498988,
+        -1.3081370772938388,
+        -0.6290100980780673
+      ],
+      "uav_02": [
+        -0.007753549921753469,
+        -1.8166473797681586,
+        1.7686288373329775,
+        0.302312856585918,
+        -0.7923240563540654,
+        -0.11877540496271584
+      ]
+    }
+  },
+  "other_state_initialization": "native reset preserved; no attitude/bias error injection; no full15 NEES claim",
+  "action_rules": {
+    "none": "none always",
+    "fixed": "first other UID only; fallback none if illegal",
+    "random_peer": "uniform legal non-none neighbors only; none if no legal peer; existing inclusive Random helper untouched",
+    "greedy": "existing expected_relative_credit and none comparison with frozen TRAIN scale"
+  },
+  "random_peer_rng": "indexed_rng(envseed,decisionstep,diag_v5_random_peer,uid)",
+  "exogenous_rng": "native indexed-v1 keys, same initial generator states for same seed/time/kind/entity; realized measurements depend on trajectory",
+  "budget_per_uav": 30,
+  "decision_steps": [
+    2,
+    6,
+    10,
+    14,
+    18,
+    22,
+    26,
+    30,
+    34,
+    38,
+    42,
+    46,
+    50,
+    54,
+    58,
+    62,
+    66,
+    70,
+    74,
+    78,
+    82,
+    86,
+    90,
+    94,
+    98,
+    102,
+    106,
+    110,
+    114,
+    118
+  ],
+  "metrics": {
+    "position_rmse_m": "sqrt(mean squared Euclidean position error over UID and completed transitions; frame0 excluded)",
+    "velocity_rmse_mps": "sqrt(mean squared Euclidean velocity error over UID and completed transitions)",
+    "position_integrated_squared_error_m2_s": "0.2*sum squared position errors /3 UAVs",
+    "position_integrated_distance_error_m_s": "0.2*sum position error norms /3 UAVs",
+    "position_bias_xyz_m": "mean estimate-minus-truth position vector over UID and completed transitions",
+    "relative_vector_rmse_m": "sqrt(mean squared error in estimated relative displacement across three pairs and completed transitions)",
+    "nees_position": "3D position error quadratic form in pseudoinverse reported position covariance",
+    "nees_position_velocity": "6D position/velocity marginal quadratic form; not full15-state consistency",
+    "nis": "native attempted and accepted VO3/UWB1 separately; missing/sentinel not counted",
+    "coverage": "descriptive one-sided chi-square95 reference exceedance only; no formal statistical consistency claim",
+    "communication": "budget=request attempts before post-motion validity gates; overhead=512 byte equivalent queue load; ordinary state transmissions separately",
+    "censoring": "record observed steps, valid metric denominator, cause/time; h120 paired contrasts only if both arms uncensored"
+  },
+  "offline_joint_reference_correlations": [
+    0.0,
+    0.5,
+    1.0
+  ],
+  "offline_reference_geometry": "initial estimated positions from locked errors; 9D position prior with specified cross covariance; B,C,BC,BB linear Gaussian illustration only",
+  "young_bound_variance_grid": [
+    1.0,
+    4.0,
+    9.0
+  ],
+  "young_bound_correlation_grid": [
+    -1.0,
+    -0.5,
+    0.0,
+    0.5,
+    1.0
+  ],
+  "deployment_changes_allowed": false,
+  "scientific_training_ready": false,
+  "stop_rule": "per-arm censor on collision/termination/nonfinite/hard-limit violation; continue other preregistered arms; integrity mismatch stops all; no replacement/redraw/additional seeds"
+}
